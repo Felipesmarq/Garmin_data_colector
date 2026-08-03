@@ -1,0 +1,16 @@
+# Credenciais
+.env
+
+# Tokens de sessão do Garmin (equivalente a uma senha — nunca versionar)
+.garmin_tokens/
+
+# Saída bruta da exploração (contém dados de saúde reais)
+explore/output/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Banco (decisão de versionar ou não o .duckdb fica pra Fase 1+)
