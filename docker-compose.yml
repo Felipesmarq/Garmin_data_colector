@@ -1,0 +1,11 @@
+services:
+  garmin:
+    build: .
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    # stdin_open + tty: sem isso o input() e o getpass (senha/MFA) travam,
+    # porque o container não tem terminal interativo por padrão.
+    stdin_open: true
+    tty: true
