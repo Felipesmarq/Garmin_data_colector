@@ -68,12 +68,45 @@ Ambos são idempotentes: rodar de novo atualiza as linhas existentes
 (por `activity_id` / `data`) em vez de duplicar — pode rodar quantas
 vezes quiser.
 
-`load_dor.py` (carregaria a planilha de dor manual) foi adiado pra
-feature futura — uma planilha Excel local não é acessível pro GitHub
-Actions sem um passo manual de commit/push a cada anotação. Detalhes da
-decisão na seção 8 do [`CASE_DO_PROJETO_1.md`](CASE_DO_PROJETO_1.md). Por
-ora o pipeline segue só com dado objetivo do Garmin (atividades +
-recuperação).
+### Fase 6 — planilha (Google Sheets): dor + dashboard de desempenho
+
+Substitui a ideia original de Excel local (inviável de sincronizar sem
+passo manual de commit — seção 9 do [`CASE_DO_PROJETO_1.md`](CASE_DO_PROJETO_1.md))
+por Google Sheets, acessível do celular. Três abas na mesma planilha:
+**Dor** (input manual, `load_dor.py`), **Atividades** e **Resumo Semanal**
+(dashboard somente-leitura, `planilha_desempenho.py`).
+
+**Setup único (console.cloud.google.com):**
+1. Crie/reaproveite um projeto no Google Cloud.
+2. **APIs e serviços → Biblioteca** → busque "Google Sheets API" → **Ativar**.
+3. **APIs e serviços → Credenciais** → **Criar credenciais** → **Conta de
+   serviço**. Dê um nome (ex. `garmin-dor-sheets`).
+4. Na conta de serviço, aba **Chaves** → **Adicionar chave** → **Criar
+   nova chave** → tipo **JSON**. Salve o arquivo baixado como
+   `.google_sheets_credentials.json` na raiz do projeto (gitignored).
+5. Crie a planilha no Google Sheets. Copie o e-mail da service account
+   (campo `client_email` no JSON) e **compartilhe a planilha** com esse
+   e-mail, permissão **Editor**.
+6. Preencha `GOOGLE_SHEETS_CREDENTIALS_PATH` e `GOOGLE_SHEET_ID` (o ID é a
+   string na URL entre `/d/` e `/edit`) no `.env`.
+
+**Uso:**
+
+```bash
+docker compose run --rm garmin python -m src.load.load_dor
+docker compose run --rm garmin python -m src.load.planilha_desempenho
+```
+
+`load_dor` roda em duas direções na mesma execução: primeiro exporta pra
+aba "Dor" as atividades que ainda não têm dor registrada (`activity_id`,
+`data`, `nome`, `tipo` — colunas de dor ficam em branco pra você
+preencher); depois importa de volta pra `stg_dor` (upsert por
+`activity_id`) as linhas que já têm a coluna `dor` preenchida.
+
+`planilha_desempenho` sobrescreve as abas "Atividades" (snapshot de
+`vw_sessoes`: pace, velocidade, FC, efeito de treino) e "Resumo Semanal"
+(snapshot de `vw_resumo_semanal`: km, variação %, ACWR) a cada execução —
+não acumula histórico duplicado, sempre reflete o estado atual do banco.
 
 ## Estrutura do projeto
 
@@ -84,11 +117,14 @@ recuperação).
 │   └── RELATORIO_FASE0.md
 ├── src/
 │   ├── db.py                   # conexão Postgres (Neon) + aplica schema.sql
+│   ├── planilha.py              # conexão Google Sheets + abas/linhas (mecânica genérica, sem regra de negócio)
 │   ├── extract/garmin.py       # puxa atividades (+ splits run/walk) e recuperação diária da API
 │   └── load/
 │       ├── schema.sql          # DDL: staging -> vw_sessoes -> vw_sessoes_ia -> vw_resumo_semanal
 │       ├── load_atividades.py  # upsert de atividades + splits
-│       └── load_recuperacao.py
+│       ├── load_recuperacao.py
+│       ├── load_dor.py         # aba "Dor": exporta pendentes + importa preenchidas em stg_dor
+│       └── planilha_desempenho.py  # abas "Atividades"/"Resumo Semanal": snapshot somente-leitura
 ├── Dockerfile · docker-compose.yml · .dockerignore  # só pra dev local, não usado em produção
 ├── requirements.txt · .env.example · .gitignore
 └── CASE_DO_PROJETO_1.md        # case completo do projeto
@@ -96,12 +132,12 @@ recuperação).
 
 ## Status
 
-Fases 0 a 5 implementadas em código (infraestrutura Postgres/Neon,
-extração e load com splits run/walk e campos de performance, `vw_sessoes`
-e `vw_sessoes_ia` já no `schema.sql`) — falta só validar contra um banco
-Neon real (nenhum projeto foi provisionado ainda). Faltam: Fase 6 (análise
-com Gemini), Fase 7 (GitHub Actions). Roadmap completo e critérios de
-aceite por fase na seção 7 do
+Fases 0 a 5 implementadas e **validadas contra um banco Neon real**
+(schema aplicado, idempotência de `load_atividades`/`load_recuperacao`
+testada). Fase 6 (dor via planilha) implementada, aguardando setup da
+credencial do Google Sheets pra ser testada ponta a ponta. Faltam: Fase 7
+(análise com Gemini), Fase 8 (GitHub Actions), Fase 9 (ajuste fino).
+Roadmap completo e critérios de aceite por fase na seção 7 do
 [`CASE_DO_PROJETO_1.md`](CASE_DO_PROJETO_1.md).
 
 ## Solução de problemas
@@ -119,8 +155,9 @@ aceite por fase na seção 7 do
 
 ## Dados sensíveis
 
-`.env` e `.garmin_tokens/` guardam credenciais (incluindo `DATABASE_URL`
-do Neon) e não vão pro Git (`.gitignore`). `explore/output/` contém dado
+`.env`, `.garmin_tokens/` e `.google_sheets_credentials.json` guardam
+credenciais (incluindo `DATABASE_URL` do Neon e a chave da service
+account do Google) e não vão pro Git (`.gitignore`). `explore/output/` contém dado
 de saúde real de amostra, também gitignored. O próprio dado de treino/sono
 vive só no Neon, fora do repositório — nada disso é commitado. O
 repositório no GitHub deve ficar **privado** como camada extra de proteção
