@@ -108,18 +108,20 @@ CREATE TABLE IF NOT EXISTS stg_recuperacao_diaria (
 );
 
 -- =====================================================================
--- STAGING: stg_dor — 1 linha por data anotada (input manual, fora de
--- escopo por ora -- ver CASE_DO_PROJETO_1.md seção 9). Colunas ficam
--- NULL até o loader voltar a existir; vw_sessoes já faz o join.
+-- STAGING: stg_dor — 1 linha por atividade anotada (input manual via
+-- planilha/Google Sheets, ver CASE_DO_PROJETO_1.md seção 9). Chave por
+-- activity_id, não por data -- uma mesma data pode ter mais de uma
+-- atividade (ver vw_sessoes), cada uma com dor própria.
 -- =====================================================================
 CREATE TABLE IF NOT EXISTS stg_dor (
-    data           DATE PRIMARY KEY,
-    dor             INTEGER CHECK (dor BETWEEN 0 AND 5),
-    localizacao     VARCHAR,
-    comentario      VARCHAR,
-    superficie      VARCHAR,
-    tenis           VARCHAR,
-    carregado_em    TIMESTAMP DEFAULT current_timestamp
+    activity_id     BIGINT PRIMARY KEY REFERENCES stg_atividades(activity_id),
+    data             DATE,
+    dor              INTEGER CHECK (dor BETWEEN 0 AND 5),
+    localizacao      VARCHAR,
+    comentario       VARCHAR,
+    superficie       VARCHAR,
+    tenis            VARCHAR,
+    carregado_em     TIMESTAMP DEFAULT current_timestamp
 );
 
 -- =====================================================================
@@ -182,7 +184,22 @@ SELECT
     d.localizacao AS localizacao_dor,
     d.comentario AS comentario_dor,
     d.superficie,
-    d.tenis
+    d.tenis,
+    -- efeito_treino_label 'UNKNOWN' da Garmin, na prática, marca atividades
+    -- curtas demais/fracas demais pra ter efeito de treino relevante --
+    -- tipicamente aquecimento ou deslocamento a pé. Não dá pra usar %
+    -- de tempo em RWD_WALK como critério à parte: o método run-walk faz
+    -- sessões de treino de verdade (RECOVERY, AEROBIC_BASE) também
+    -- passarem 70-96% do tempo em RWD_WALK por estrutura, não por serem
+    -- "só caminhada" -- então o label 'UNKNOWN' da própria Garmin já é o
+    -- sinal mais confiável que existe pra esse caso.
+    -- classificacao_atividade não sobrescreve o campo bruto acima; coluna
+    -- no fim do SELECT porque Postgres não permite CREATE OR REPLACE VIEW
+    -- inserir coluna no meio (só no fim).
+    CASE
+        WHEN a.efeito_treino_label = 'UNKNOWN' THEN 'CAMINHADA'
+        ELSE a.efeito_treino_label
+    END AS classificacao_atividade
 FROM stg_atividades a
 LEFT JOIN (
     SELECT
@@ -193,7 +210,7 @@ LEFT JOIN (
     GROUP BY activity_id
 ) s ON s.activity_id = a.activity_id
 LEFT JOIN stg_recuperacao_diaria r ON r.data = a.data
-LEFT JOIN stg_dor d ON d.data = a.data;
+LEFT JOIN stg_dor d ON d.activity_id = a.activity_id;
 
 -- =====================================================================
 -- VIEW: vw_sessoes_ia — subconjunto curado de vw_sessoes, é o que
