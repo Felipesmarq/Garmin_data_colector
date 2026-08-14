@@ -8,6 +8,18 @@
 > tabela materializada e vira view por atividade (não mais por dia); Excel
 > confirmado fora de escopo. Ver seção 11 para o racional de cada troca.
 
+> **Nota de revisão (2026-08-14):** registro de dor volta a entrar em
+> escopo, antes da Fase 6/7 originais — não mais "quando voltar como
+> feature" (seção 9 antiga). Substitui a ideia de Excel (rejeitada em
+> 2026-08-13) por Google Sheets, que resolve o problema real (acessível
+> do celular, sem passo manual de commit) sem os riscos de um form
+> genérico. Vira a nova **Fase 6**, entre `vw_sessoes_ia` e a análise
+> com IA — todas as fases depois dela sobem 1 número (IA: 6→7,
+> orquestração: 7→8, ajuste fino: 8→9). `stg_dor` migra de PK `data`
+> para PK `activity_id`, acompanhando o mesmo motivo que já tinha
+> movido `fct_sessoes` → `vw_sessoes` (uma data pode ter mais de uma
+> atividade). Ver seção 11 para o racional completo.
+
 ## 1. Contexto
 
 Felipe é um corredor construindo o hábito de correr depois de meses lidando com
@@ -69,6 +81,7 @@ Relógio Garmin ──sync──▶ Garmin Connect
 | Extração | `garminconnect` (PyPI) | Melhor opção existente pronta — sem alternativa madura melhor no momento |
 | Armazenamento | **Postgres gerenciado (Neon)** | Free sem cartão, scale-to-zero (custo zero ocioso), SQL completo, elimina dado sensível versionado no git. Substitui o DuckDB commitado. |
 | Transformação | SQL (views no Postgres) | Staging → view por atividade → view agregada semanal — sem tabela materializada nem script de ETL extra |
+| Registro de dor | **Google Sheets (`gspread`)** | Acessível do celular, sem passo manual de commit — resolve o mesmo problema que tornou o Excel local inviável (ver seção 11), com autenticação via service account em vez de OAuth de usuário. |
 | Análise | **Gemini API (Google AI Studio)** | Free tier: 1.500 req/dia, sem cartão, contexto de até 1M tokens. Substitui Anthropic (custo zero era requisito). Chamada isolada atrás de uma função única para permitir trocar de provedor sem reescrever o resto — free tiers de LLM mudam com frequência. |
 | Orquestração | GitHub Actions (2 workflows agendados) | Grátis, cron nativo, já versiona o código, Secrets pra credenciais. Único ambiente de produção — Docker fica só como conveniência de dev local, não faz parte da arquitetura de produção. |
 | Dev local | Docker / docker-compose (opcional) | Só para rodar/testar mais rápido na máquina local, sem instalar Python direto. Não é usado em produção. |
@@ -88,11 +101,14 @@ garmin-ia-pipeline/
 │   └── analise_semanal.yml     # roda todo domingo: gera a análise da semana
 ├── src/
 │   ├── db.py                   # conexão + helpers do Postgres (psycopg)
+│   ├── planilha.py              # conexão Google Sheets + abas/linhas (mecânica genérica, sem regra de negócio)
 │   ├── extract/garmin.py       # puxa atividades + sono/FC de repouso
 │   ├── load/
 │   │   ├── schema.sql          # DDL Postgres: stg_atividades, stg_recuperacao_diaria, stg_dor
 │   │   ├── views.sql           # vw_sessoes, vw_sessoes_ia, vw_resumo_semanal
-│   │   └── load_atividades.py / load_recuperacao.py  # upsert incremental (ON CONFLICT)
+│   │   ├── load_atividades.py / load_recuperacao.py  # upsert incremental (ON CONFLICT)
+│   │   ├── load_dor.py         # Fase 6 -- aba "Dor": exporta pendentes + importa preenchidas
+│   │   └── planilha_desempenho.py  # Fase 6 -- abas "Atividades"/"Resumo Semanal", somente-leitura
 │   └── analyze/analisar_com_ia.py
 ├── explore/                    # scripts de investigação (não fazem parte do pipeline final)
 ├── requirements.txt · .env.example · .gitignore · README.md
@@ -109,16 +125,22 @@ Neon, fora do repositório.
   solo, oscilação vertical, elevação, efeito de treino, etc.)
 - `stg_recuperacao_diaria` — 1 linha por dia (PK `data`): sono, FC de
   repouso, body battery, estresse, passos.
-- `stg_dor` — mantida no schema (colunas ficam NULL por ora, fora de escopo
-  — ver seção 9), sem loader ativo.
+- `stg_dor` — 1 linha por **atividade** anotada (PK `activity_id`, não
+  `data` — mesmo motivo de `vw_sessoes` ser por atividade: um dia pode ter
+  mais de uma corrida, cada uma com dor própria). Alimentada pelo
+  `load_dor.py` (Fase 6) a partir de uma planilha Google Sheets — ver
+  seção 11.
 
 **`vw_sessoes` (view, não mais tabela materializada) — 1 linha por
 atividade:**
-LEFT JOIN de `stg_atividades` com `stg_recuperacao_diaria` e `stg_dor` pela
-data da atividade. Chave é `activity_id`, não `data` — **todas as atividades
-entram**, incluindo múltiplas no mesmo dia. Substitui a antiga `fct_sessoes`
-(tabela) e elimina a fase de transform/upsert que ela exigia: é sempre
-recalculada na hora, sem risco de ficar dessincronizada.
+LEFT JOIN de `stg_atividades` com `stg_recuperacao_diaria` (pela data) e
+`stg_dor` (por `activity_id`). Chave é `activity_id`, não `data` — **todas
+as atividades entram**, incluindo múltiplas no mesmo dia. Substitui a
+antiga `fct_sessoes` (tabela) e elimina a fase de transform/upsert que ela
+exigia: é sempre recalculada na hora, sem risco de ficar dessincronizada.
+Inclui `classificacao_atividade`, derivada de `efeito_treino_label`
+(`'UNKNOWN'` → `'CAMINHADA'`, resto passa direto) — ver seção 6.1 pra por
+que esse é o único critério confiável disponível.
 
 **`vw_sessoes_ia` (view curada) — só os campos com sinal para geração de
 treino + guardrail de sobrecarga:**
@@ -226,6 +248,75 @@ próximo treino (ex.: se a última sessão veio com 5.0, a recomendação seguin
 deveria puxar pra recuperação, não pra intensidade) — por isso continua em
 `vw_sessoes_ia`.
 
+### Como o `efeito_treino_label` (Primary Benefit) é calculado — e o que não é público
+
+Pesquisa feita em 2026-08-14 (Firstbeat, fóruns Garmin) pra entender a
+origem do texto categórico (`AEROBIC_BASE`, `RECOVERY`, `TEMPO`,
+`UNKNOWN`, etc.) que aparece em `efeito_treino_label` — diferente do
+score numérico 0-5 (`efeito_treino_aerobico`/`anaerobico`), que a
+Firstbeat documenta publicamente (seção acima).
+
+**O que é documentado:** o score é derivado de **EPOC** (Excess
+Post-Exercise Oxygen Consumption, "débito de oxigênio"), previsto em
+tempo real a partir de FC — a Firstbeat usa uma rede neural que combina
+FC, variabilidade de FC (proxy de frequência respiratória) e a dinâmica
+de subida/descida da FC ("on/off-kinetics") pra estimar intensidade
+relativa (%VO2max) segundo a segundo. O **aeróbico** usa o **pico** de
+EPOC atingido na sessão (não o total acumulado — um pico curto de alta
+intensidade pontua diferente de manter esse nível a sessão toda); o
+**anaeróbico** usa FC combinada com velocidade/potência. O resultado é
+calibrado pela sua capacidade estimada (VO2max) — por isso o mesmo
+treino físico gera notas diferentes pra pessoas diferentes. Escala:
+0.0–0.9 sem efeito, 1.0–1.9 recuperação, 2.0–2.9 mantém condicionamento,
+3.0–3.9 melhora, 4.0–4.9 melhora bastante, 5.0 overreaching.
+
+**O que NÃO é documentado:** a regra exata que transforma esse par de
+scores (+ o que mais for usado — duração, distribuição de tempo por
+zona de FC, %FC máxima) num dos rótulos categóricos (`AEROBIC_BASE`,
+`RECOVERY`, `TEMPO`, `LACTATE_THRESHOLD`, `VO2MAX`,
+`ANAEROBIC_CAPACITY`, `SPRINT`, `UNKNOWN`, ...) é proprietária da
+Firstbeat/Garmin e não está em nenhum white paper público. Um
+funcionário do fórum da Garmin confirma que o cálculo usa **% da FC
+máxima, não as zonas configuradas no relógio** ("the algorithm is based
+on % of MHR, not on zones"), e que a mesma sessão pode gerar rótulos
+diferentes em re-processamentos (ruído de GPS/HR). `UNKNOWN`
+especificamente **não tem definição pública** — o que sabemos sobre ele
+é 100% empírico, observado nos próprios dados deste projeto (ver seção
+11: nas duas atividades `UNKNOWN` registradas até agora, o score
+aeróbico é 0.4 e a duração é curta, <10 min — consistente com "curto/
+fraco demais pra classificar", mas isso é inferência nossa, não
+documentação da Garmin).
+
+**Por que isso importa pro projeto:** `classificacao_atividade` (seção
+6, Fase 6) trata `UNKNOWN` como um caso especial exatamente por essa
+razão — como a regra de classificação da Garmin é opaca, não dá pra
+tentar replicá-la ou prever quando ela vai gerar outro rótulo raro; o
+mais seguro é confiar no rótulo que a própria Garmin já decidiu, e só
+reinterpretar o único caso (`UNKNOWN`) onde a falta de rótulo, por si
+só, já é o sinal.
+
+**Fontes:** [Firstbeat — EPOC and Training Effect](https://www.firstbeat.com/en/science-and-physiology/epoc-and-training-effect/) · [Firstbeat — EPOC white paper (PDF)](https://www.firstbeat.com/wp-content/uploads/2015/10/white_paper_epoc.pdf) · [the5krunner — Garmin Training Effect explicado](https://the5krunner.com/garmin-features/training/training-effect/) · [Fórum Garmin — "How is a tempo run Training Effect defined?"](https://forums.garmin.com/sports-fitness/running-multisport/f/forerunner-945/275419/how-is-a-tempo-run-training-effect-defined)
+
+### Zonas de FC — o que é armazenado (e o que não é)
+
+Verificado no código (`extract/garmin.py`, `load/schema.sql`) em
+2026-08-14: `stg_atividades` guarda **5 colunas por atividade**
+(`tempo_zona_fc_1` a `tempo_zona_fc_5`, mapeadas direto de
+`hrTimeInZone_1..5` da API) — cada uma é o **tempo em segundos** que
+você passou naquela zona **durante aquela atividade específica**. É
+granularidade por atividade (`activity_id`), não por dia — a mesma
+lógica de `vw_sessoes` desde a Fase 4.
+
+**O que não é capturado:** os **limites de BPM** que definem onde cada
+zona começa/termina (ex. "zona 2 = 120–140 bpm") não vêm nesses campos
+e não são armazenados em lugar nenhum do schema atual — só a duração
+resultante em cada zona. Se um dia for preciso saber os limiares em si
+(pra recalcular zona com uma fórmula diferente, por exemplo), seria
+preciso um campo novo (a API expõe isso separadamente do resumo da
+atividade, não investigado ainda) e um loader novo — fora de escopo por
+ora, porque `vw_sessoes_ia` já usa os tempos por zona como estão, sem
+precisar saber os limiares.
+
 ### Dinâmica de corrida — cadência, tempo de contato com solo, oscilação vertical, comprimento de passada
 
 Tempo de contato com solo (GCT) tem correlação forte com economia de corrida
@@ -269,7 +360,7 @@ conexão via `DATABASE_URL` em variável de ambiente (local `.env`, produção
 GitHub Secret).
 **Critérios de aceite:**
 - [x] `schema.sql` aplica sem erro num banco Neon vazio (validado em 2026-08-13: 4 tabelas + 3 views criadas e consultáveis).
-- [ ] Conexão funciona local **(confirmado)** e via GitHub Actions usando o mesmo `DATABASE_URL` (Secret) — falta a parte do GitHub Actions, ver Fase 7.
+- [x] Conexão funciona local **(confirmado)** — falta a parte do GitHub Actions, ver Fase 8.
 - [x] Nenhum arquivo de banco (`.duckdb`, dump, etc.) é commitado a partir desta fase.
 
 ### Fase 2 — Extração (`extract/garmin.py`)
@@ -280,22 +371,57 @@ GitHub Secret).
 DuckDB por psycopg; lógica de `ON CONFLICT` (upsert) é compatível com
 Postgres sem mudança de sintaxe.
 **Critérios de aceite:**
-- [ ] Rodar o load duas vezes seguidas com os mesmos dados não duplica linhas (idempotência mantida).
+- [x] Rodar o load duas vezes seguidas com os mesmos dados não duplica linhas (idempotência mantida) — testado em 2026-08-14 contra o Neon real, com dado sintético, para as duas tabelas.
 - [ ] `stg_atividades` e `stg_recuperacao_diaria` continuam capturando todos os campos brutos, sem corte.
 
 ### Fase 4 — `vw_sessoes` (nova, substitui `fct_sessoes`)
-**Requisitos:** view por `activity_id`, LEFT JOIN com recuperação e dor do dia.
+**Requisitos:** view por `activity_id`, LEFT JOIN com recuperação (por data) e dor (por `activity_id`, ver Fase 6).
 **Critérios de aceite:**
 - [ ] Um dia com duas atividades gera duas linhas na view (nenhuma atividade descartada).
-- [ ] Nenhum script de transform/upsert é necessário para manter a view atualizada — é sempre live.
+- [x] Nenhum script de transform/upsert é necessário para manter a view atualizada — é sempre live.
 
 ### Fase 5 — `vw_sessoes_ia` (nova)
 **Requisitos:** view curada conforme lista da seção 6.
 **Critérios de aceite:**
-- [ ] Contém todos os campos listados na seção 6, e nenhum outro (em particular, sem `calorias`).
+- [ ] Contém todos os campos listados na seção 6, e nenhum outro (em particular, sem `calorias`). Nota: com dor ainda sem nenhuma linha registrada, `dor`/`localizacao_dor`/`comentario_dor` chegam sempre `NULL` até a Fase 6 ter dado real — decidir antes da Fase 7 se isso é filtrado no Python ou tolerado como está.
 - [ ] Consulta roda em menos de 1s (garante que não virou gargalo desnecessário).
 
-### Fase 6 — Análise com IA (`analyze/analisar_com_ia.py`)
+### Fase 6 — Registro de dor via planilha + dashboard de desempenho
+**Requisitos:** uma planilha Google Sheets com três abas, cada uma com uma
+responsabilidade:
+- **"Dor"** (`load_dor.py`) — input manual. Roda em duas direções na
+  mesma execução: exporta pra planilha as atividades de `stg_atividades`
+  sem linha correspondente em `stg_dor` (activity_id, data, nome, tipo,
+  colunas de dor em branco), e importa de volta pra `stg_dor` (upsert por
+  `activity_id`) as linhas já preenchidas.
+- **"Atividades"** e **"Resumo Semanal"** (`planilha_desempenho.py`) —
+  somente leitura, snapshot de `vw_sessoes`/`vw_resumo_semanal`
+  (pace, velocidade, km, ACWR) sobrescrito a cada execução, sem upsert em
+  nenhuma tabela — pra acompanhar desempenho/evolução sem abrir o Neon.
+
+A mecânica de planilha (conectar, abrir/criar aba, inserir/sobrescrever
+linhas) foi extraída pra `src/planilha.py`, compartilhada pelos dois
+scripts — mesmo padrão de `src/db.py` do lado do Postgres, mantendo
+`load_dor.py` e `planilha_desempenho.py` focados só na regra de negócio
+de cada um.
+
+Autenticação via service account do Google Cloud
+(`GOOGLE_SHEETS_CREDENTIALS_PATH`, `GOOGLE_SHEET_ID` no `.env`/Secret).
+**Critérios de aceite:**
+- [x] `stg_dor` com PK `activity_id` (migrado de `data`), aplicado e
+  validado contra o Neon real em 2026-08-14.
+- [x] Fluxo testado ponta a ponta contra uma planilha real em 2026-08-14:
+  exportar → preencher manualmente → importar → confirmado em `stg_dor`.
+- [x] Rodar `load_dor.py` duas vezes seguidas não duplica linha nem na
+  planilha nem em `stg_dor` — testado em 2026-08-14.
+- [x] `planilha_desempenho.py` sobrescreve as abas em vez de acumular —
+  testado rodando duas vezes seguidas, mesma contagem de linhas.
+- [ ] Formatação (cabeçalho fixo/congelado) e validação de dados
+  (dropdown pra `dor` 0-5 e pra `localizacao`/`superficie`/`tenis`) —
+  ainda não implementado, avaliar se via código (`src/planilha.py`) ou
+  ajuste manual na planilha.
+
+### Fase 7 — Análise com IA (`analyze/analisar_com_ia.py`)
 **Requisitos:** chamada à API Gemini a partir de `vw_sessoes_ia` +
 `vw_resumo_semanal`; chamada ao LLM isolada numa função única
 (`gerar_analise(prompt) -> texto`) para permitir trocar de provedor sem
@@ -305,16 +431,19 @@ reescrever o resto.
 - [ ] Relatório sinaliza explicitamente quando o ACWR (carga aguda/carga crônica) sai da zona segura 0.8–1.3, com alerta reforçado acima de 1.5 (guardrail de sobrecarga, ver seção 6.1).
 - [ ] Chave da API vem de variável de ambiente, nunca hardcoded.
 
-### Fase 7 — Orquestração (GitHub Actions)
-**Requisitos:** `sync_atividades.yml` (schedule, ex. a cada 2-3h) e
-`analise_semanal.yml` (schedule, domingo). Secrets: token Garmin,
-`DATABASE_URL`, chave Gemini.
+### Fase 8 — Orquestração (GitHub Actions)
+**Requisitos:** `sync_atividades.yml` (schedule, ex. a cada 2-3h),
+`sync_dor.yml` (ou incorporado ao `analise_semanal.yml` — roda
+`load_dor.py` antes de gerar a análise, pra pegar dor preenchida durante
+a semana) e `analise_semanal.yml` (schedule, domingo). Secrets: token
+Garmin, `DATABASE_URL`, chave Gemini, credencial da service account do
+Google Sheets.
 **Critérios de aceite:**
 - [ ] Pipeline roda ponta a ponta sem intervenção manual por pelo menos 2 semanas seguidas.
 - [ ] Nenhum dado sensível (FC, sono, localização de dor) aparece em log do Actions.
 - [ ] Nenhum commit automático de dado é gerado pelo workflow.
 
-### Fase 8 — Ajuste fino
+### Fase 9 — Ajuste fino
 Frequência de polling, prompt, extras — a definir com base no uso real.
 
 ## 8. Riscos e decisões (atualizado)
@@ -337,10 +466,11 @@ Frequência de polling, prompt, extras — a definir com base no uso real.
 
 ## 9. Fora de escopo (por ora)
 
-- **Registro de dor** — Excel confirmado fora de escopo (inviável manter
-  sincronizado sem passo manual). `stg_dor` permanece no schema com colunas
-  NULL; quando voltar como feature, falta decidir a fonte (form acessível
-  via API) e escrever o loader — schema já suporta.
+- **Excel como interface de dor** — confirmado fora de escopo em
+  2026-08-13 (inviável manter sincronizado sem passo manual). Substituído
+  por Google Sheets — ver Fase 6 (seção 7) e racional na seção 11. O
+  registro de dor em si **não está mais fora de escopo** a partir desta
+  revisão.
 - **Docker em produção** — fica só como conveniência de dev local.
 
 ## 10. Critérios de sucesso
@@ -351,8 +481,8 @@ Frequência de polling, prompt, extras — a definir com base no uso real.
 - Relatório sinaliza risco de sobrecarga (ACWR fora da zona 0.8–1.3) quando aplicável.
 - Nenhum dado sensível commitado no GitHub a partir desta revisão.
 - Histórico consultável via SQL (Postgres) para qualquer análise futura.
-- *(quando o registro de dor voltar)*: manter constância de treino por 4+
-  semanas sem recidiva de dor ≥3.
+- Manter constância de treino por 4+ semanas sem recidiva de dor ≥3
+  (mensurável a partir da Fase 6, quando `stg_dor` passa a ter dado real).
 
 ## 11. Racional das trocas desta revisão
 
@@ -388,3 +518,44 @@ referência futura:
   Acute:Chronic Workload Ratio (Gabbett, 2016) é o framework com base
   científica real e já computável com os dados que já são coletados (carga
   aguda 7 dias / carga crônica 28 dias).
+
+Decisões da sessão de 2026-08-14, para referência futura:
+
+- **Excel → Google Sheets, e dor volta a entrar em escopo**: a rejeição de
+  2026-08-13 era do Excel especificamente (arquivo local, exige commit
+  manual a cada anotação — incompatível com "totalmente automático"), não
+  do registro de dor em si. Google Sheets resolve o problema real
+  (acessível do celular, editável de qualquer lugar, sem passo de
+  commit/push) via API com autenticação de service account — mesmo
+  princípio do Neon (credencial de sistema, não login pessoal por trás de
+  cada execução automatizada).
+- **Por que vira Fase 6, entre `vw_sessoes_ia` e a análise com IA, e não
+  depois da Fase 7/8 como o plano original implicava**: a Fase 7 (análise)
+  já consome `vw_sessoes_ia`, que inclui `dor`/`localizacao_dor`/
+  `comentario_dor` desde que essas colunas foram adicionadas ao join —
+  ficariam sempre `NULL` no prompt até o loader existir, que é exatamente
+  o tipo de contexto sem sinal que a curadoria da view foi desenhada pra
+  evitar (seção 6.1). Resolver o registro de dor antes da Fase 7 evita
+  escrever/testar o prompt contra um campo garantidamente vazio.
+- **`stg_dor`: PK `data` → PK `activity_id`**: mesma motivação que já tinha
+  levado `fct_sessoes` a virar `vw_sessoes` — uma data pode ter mais de uma
+  atividade (múltiplas corridas no mesmo dia), cada uma com dor própria.
+  Chave por `data` colapsaria as duas. A tabela estava vazia (sem loader
+  ativo até agora), então a migração foi um `DROP TABLE` + reaplicação do
+  `schema.sql`, sem risco de perda de dado real.
+- **`vw_sessoes.classificacao_atividade` (nova coluna)**: hipótese inicial
+  era usar % de tempo em `RWD_WALK` (>80% do tempo) pra identificar
+  atividades que são "só caminhada" (aquecimento/deslocamento a pé) e
+  rotulá-las como tal na planilha de desempenho. **Descartada após checar
+  os dados**: como o treino usa o método run-walk, sessões de treino de
+  verdade (`RECOVERY`, `AEROBIC_BASE`) também passam 70-96% do tempo em
+  `RWD_WALK` por estrutura — a proporção de caminhada não distingue "foi
+  só um aquecimento" de "foi treino de verdade". (Nota: uma investigação
+  inicial, apresentada de forma incorreta durante a sessão por troca dos
+  valores de correndo/caminhando na leitura da query, tinha "confirmado"
+  a hipótese contrária — corrigido depois com uma query isolada e sem
+  ambiguidade.) O sinal que sobrou, e que efetivamente diferencia as duas
+  atividades curtas observadas: o próprio `efeito_treino_label = 'UNKNOWN'`
+  da Garmin, sem nenhum cálculo adicional — ver seção 6.1 pra por que a
+  regra de classificação da Garmin em si não é pública, então não há como
+  fazer melhor que confiar no rótulo que ela já decidiu.
