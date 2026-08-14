@@ -3,7 +3,8 @@
 Diferente do explore/inspect_garmin.py (Fase 0, que só explora e imprime
 o JSON bruto), este módulo já devolve os dados mapeados pras colunas do
 `src/load/schema.sql` (Fase 1), prontos pro `load/*.py` (Fase 3) inserir
-no DuckDB. Mapeamento de campos documentado em explore/RELATORIO_FASE0.md.
+no Postgres (Neon). Mapeamento de campos documentado em
+explore/RELATORIO_FASE0.md e em CASE_DO_PROJETO_1.md (seção 6.1).
 
 Uso típico (de outro script):
 
@@ -101,6 +102,7 @@ def _mapear_atividade(raw: dict) -> dict:
         "duracao_movimento_seg": raw.get("movingDuration"),
         "velocidade_media_mps": raw.get("averageSpeed"),
         "velocidade_maxima_mps": raw.get("maxSpeed"),
+        "velocidade_ajustada_grade_mps": raw.get("avgGradeAdjustedSpeed"),
         "fc_media": raw.get("averageHR"),
         "fc_maxima": raw.get("maxHR"),
         "cadencia_media": raw.get("averageRunningCadenceInStepsPerMinute"),
@@ -108,6 +110,11 @@ def _mapear_atividade(raw: dict) -> dict:
         "ganho_elevacao": raw.get("elevationGain"),
         "perda_elevacao": raw.get("elevationLoss"),
         "elevacao_media": raw.get("avgElevation"),
+        "elevacao_minima": raw.get("minElevation"),
+        "elevacao_maxima": raw.get("maxElevation"),
+        "potencia_media": raw.get("avgPower"),
+        "potencia_maxima": raw.get("maxPower"),
+        "potencia_normalizada": raw.get("normPower"),
         "efeito_treino_aerobico": raw.get("aerobicTrainingEffect"),
         "efeito_treino_anaerobico": raw.get("anaerobicTrainingEffect"),
         "efeito_treino_label": raw.get("trainingEffectLabel"),
@@ -120,22 +127,57 @@ def _mapear_atividade(raw: dict) -> dict:
         "comprimento_passada_medio": raw.get("avgStrideLength"),
         "oscilacao_vertical_media": raw.get("avgVerticalOscillation"),
         "razao_vertical_media": raw.get("avgVerticalRatio"),
+        "fastest_split_1km_seg": raw.get("fastestSplit_1000"),
+        "fastest_split_1milha_seg": raw.get("fastestSplit_1609"),
+        "minutos_intensidade_moderada": raw.get("moderateIntensityMinutes"),
+        "minutos_intensidade_vigorosa": raw.get("vigorousIntensityMinutes"),
+        "body_battery_variacao": raw.get("differenceBodyBattery"),
         "calorias": raw.get("calories"),
     }
+
+
+def _mapear_splits(raw: dict) -> list[dict]:
+    """splitSummaries -> linhas de stg_atividade_splits.
+
+    É aqui que o método run-walk aparece de verdade: splitType 'RWD_RUN' /
+    'RWD_WALK' alternando dentro da mesma atividade. Atividades sem
+    segmentação (a maioria dos tipos que não são run-walk) simplesmente não
+    têm `splitSummaries` — devolve lista vazia nesse caso.
+    """
+    splits = raw.get("splitSummaries") or []
+    return [
+        {
+            "split_index": i,
+            "tipo": s.get("splitType"),
+            "duracao_seg": s.get("duration"),
+            "distancia_m": s.get("distance"),
+            "velocidade_media_mps": s.get("averageSpeed"),
+            "velocidade_maxima_mps": s.get("maxSpeed"),
+            "ganho_elevacao": s.get("totalAscent"),
+            "perda_elevacao": s.get("elevationLoss"),
+        }
+        for i, s in enumerate(splits)
+    ]
 
 
 def atividades_novas(api: Garmin, dias: int = 7, limite: int = 20) -> list[dict]:
     """Atividades dos últimos `dias` dias, já mapeadas pro schema.
 
     `dias`/`limite` servem só como corte de segurança — a deduplicação
-    de verdade (não inserir de novo o que já está no DuckDB) é
+    de verdade (não inserir de novo o que já está no banco) é
     responsabilidade do load/load_atividades.py (Fase 3), via
     activity_id (PRIMARY KEY em stg_atividades).
     """
     corte = date.today() - timedelta(days=dias)
     brutas = api.get_activities(0, limite)
-    mapeadas = [_mapear_atividade(a) for a in brutas]
-    return [a for a in mapeadas if a["data"] and date.fromisoformat(a["data"]) >= corte]
+    mapeadas = []
+    for bruta in brutas:
+        atividade = _mapear_atividade(bruta)
+        if not atividade["data"] or date.fromisoformat(atividade["data"]) < corte:
+            continue
+        atividade["splits"] = _mapear_splits(bruta)
+        mapeadas.append(atividade)
+    return mapeadas
 
 
 # =====================================================================
