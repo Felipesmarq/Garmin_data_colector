@@ -1,5 +1,6 @@
 # Credenciais
 .env
+.google_sheets_credentials.json
 
 # Tokens de sessão do Garmin (equivalente a uma senha — nunca versionar)
 .garmin_tokens/
