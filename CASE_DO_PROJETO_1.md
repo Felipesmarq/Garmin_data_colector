@@ -140,16 +140,21 @@ antiga `fct_sessoes` (tabela) e elimina a fase de transform/upsert que ela
 exigia: é sempre recalculada na hora, sem risco de ficar dessincronizada.
 Inclui `classificacao_atividade`, derivada de `efeito_treino_label`
 (`'UNKNOWN'` → `'CAMINHADA'`, resto passa direto) — ver seção 6.1 pra por
-que esse é o único critério confiável disponível.
+que esse é o único critério confiável disponível. Inclui também
+`tipo_treino`, classificação mais específica (Rodagem/Longão/Ritmo/
+Limiar/Intervalado/Tiro/Caminhada) pelo sistema de Jack Daniels, derivada
+de % de tempo por zona de FC + efeito anaeróbico — ver seção 6.1.
 
 **`vw_sessoes_ia` (view curada) — só os campos com sinal para geração de
 treino + guardrail de sobrecarga:**
 distância, duração, pace, FC média/máxima, cadência, tempo de contato com
 solo, comprimento de passada, oscilação/razão vertical, velocidade máxima,
-ganho/perda de elevação, efeito de treino aeróbico/anaeróbico + label, zonas
-de FC 1-5, sono (total + score), FC de repouso, body battery ao acordar, dor
-(quando existir). **Excluído:** calorias — não agrega sinal que
-duração+distância+FC já não capturem.
+ganho/perda de elevação, efeito de treino aeróbico/anaeróbico, `tipo_treino`
+(não `classificacao_atividade`/`efeito_treino_label` — mesmo vocabulário
+que a Fase 7 usa pra recomendar, fecha o elo entre histórico e
+recomendação), zonas de FC 1-5, sono (total + score), FC de repouso, body
+battery ao acordar, dor (quando existir). **Excluído:** calorias — não
+agrega sinal que duração+distância+FC já não capturem.
 Motivo da curadoria: pesquisa recente (EMNLP 2025, benchmark controlado)
 mostra degradação de acurácia de raciocínio em curva de lei de potência
 conforme aumenta contexto irrelevante no prompt — não é sobre limite de
@@ -317,6 +322,66 @@ atividade, não investigado ainda) e um loader novo — fora de escopo por
 ora, porque `vw_sessoes_ia` já usa os tempos por zona como estão, sem
 precisar saber os limiares.
 
+### Classificação de tipo de treino (`tipo_treino`) — fonte e método
+
+Pesquisa feita em 2026-08-14 pra dar ao prompt da Fase 7 um vocabulário de
+tipo de treino mais específico que `classificacao_atividade` (que só
+repete o rótulo opaco da Garmin — seção anterior). Explicação genérica do
+método — sem números reais do treino do Felipe.
+
+**Fonte:** o sistema de zonas de treino de Jack Daniels (*Daniels' Running
+Formula*), referência padrão em ciência do esporte pra treino de corrida,
+divide sessões em cinco tipos por %VO2max: **E (Easy)** 65–78%, base
+aeróbica/recuperação; **M (Marathon)** 80–84%, ritmo de prova longa;
+**T (Threshold)** 88–92%, eleva limiar de lactato; **I (Interval)**
+95–100%, maximiza VO2max, repetições de 3–5min; **R (Repetition)** acima
+de 100% (ritmo de milha), potência anaeróbica/velocidade/economia,
+repetições curtas com recuperação completa. Mapeado pra nomenclatura
+usada no Brasil: Rodagem/Recuperação (E), Longão (E estendido), Ritmo
+(M), Limiar (T), Intervalado (I), Tiro (R), mais Fartlek (variação livre
+de ritmo, sem estrutura fixa — mistura estímulo aeróbico/anaeróbico).
+
+**Por que não usar a estrutura de splits (RWD_RUN/RWD_WALK) como
+critério:** a hipótese inicial era usar % de tempo em caminhada pra
+detectar o tipo de treino, mas isso já tinha sido descartado pra
+`classificacao_atividade` (seção 11) pelo mesmo motivo que se aplica
+aqui — o método run-walk faz treinos de intensidade bem diferente
+passarem proporções parecidas de tempo caminhando, só por estrutura.
+Estrutura de split não é sinal de intensidade.
+
+**Método adotado:** classificar por **distribuição de tempo por zona de
+FC** (`tempo_zona_fc_1..5`, já validada como coluna por atividade —
+seção anterior) mais `efeito_treino_anaerobico` como gatilho pra
+Intervalado/Tiro. Zona é sinal direto de intensidade relativa (%FC
+máxima), o que a estrutura de split não é. Regra (implementada em
+`vw_sessoes`, coluna `tipo_treino`):
+- Zonas 4+5 ≥ 40% do tempo → **Limiar**.
+- Zonas 4+5 ≥ 20% ou zona 3 ≥ 30% → **Ritmo**.
+- Zonas 1+2 ≥ 85% do tempo e duração ≥ 35min → **Longão**.
+- Efeito anaeróbico ≥ 1.5 e zonas 4+5 ≥ 30% → **Tiro** (duração < 20min)
+  ou **Intervalado** (duração ≥ 20min).
+- `efeito_treino_label = 'UNKNOWN'` → **Caminhada** (mesmo critério de
+  `classificacao_atividade`).
+- Nenhum dos critérios acima → **Rodagem/Recuperação** (default).
+
+**Validação:** testado contra o histórico real de atividades do Felipe
+antes de virar código definitivo (não só teoria) — resultado confirmado
+como coerente com o esforço percebido de cada sessão. Um achado notável:
+com o volume de treino até 2026-08-14, `efeito_treino_anaerobico` nunca
+passou de um patamar baixo em nenhuma atividade — ou seja, nenhuma
+sessão registrada até agora foi um Intervalado/Tiro de verdade pelo
+critério fisiológico da própria Garmin, mesmo em sessões com alternância
+de ritmo. Confirma que classificar por estrutura de split teria gerado
+falsos positivos.
+
+**Limitação conhecida:** sem VO2max/paces de referência calibrados (ex.
+via um tempo de prova recente), os limiares de zona usados são os que o
+relógio já define, não os %VO2max exatos do sistema Daniels — a
+classificação é uma aproximação por zona relativa, não o método
+original ao pé da letra.
+
+**Fontes:** [Daniels' Running Formula — resumo (Fellrnr)](https://fellrnr.com/wiki/Jack_Daniels) · [Jack Daniels' Running Intensity — Coach Ray](https://www.coachray.nz/2023/05/03/jack-daniels-running-intensity/) · [Fartlek — Wikipedia](https://en.wikipedia.org/wiki/Fartlek) · [Tipos de treino de corrida em português — Corrida Perfeita](https://www.corridaperfeita.com/treinos-de-corrida-intervalado-fartlek-de-ritmo-e-educativo/)
+
 ### Dinâmica de corrida — cadência, tempo de contato com solo, oscilação vertical, comprimento de passada
 
 Tempo de contato com solo (GCT) tem correlação forte com economia de corrida
@@ -422,14 +487,24 @@ Autenticação via service account do Google Cloud
   ajuste manual na planilha.
 
 ### Fase 7 — Análise com IA (`analyze/analisar_com_ia.py`)
-**Requisitos:** chamada à API Gemini a partir de `vw_sessoes_ia` +
-`vw_resumo_semanal`; chamada ao LLM isolada numa função única
-(`gerar_analise(prompt) -> texto`) para permitir trocar de provedor sem
-reescrever o resto.
+**Requisitos:** chamada à API Gemini (`google-genai`, modelo
+`gemini-2.5-flash` configurável via `GEMINI_MODEL`) a partir de
+`vw_sessoes_ia` (últimas `JANELA_SEMANAS` = 4 semanas, mesma unidade da
+carga crônica do ACWR) + `vw_resumo_semanal`; chamada ao LLM isolada numa
+função única (`gerar_analise(prompt) -> texto`) para permitir trocar de
+provedor sem reescrever o resto. Saída é o **plano da semana** (dia a
+dia, incluindo descanso), não uma recomendação avulsa de próxima sessão —
+usa o vocabulário fechado de `tipo_treino` (seção 6.1) tanto pro
+histórico quanto pra recomendação, pra soar como um treinador de verdade
+em vez de sugestão genérica. Guardrail de ACWR é determinístico em
+Python (`_instrucao_guardrail`), não depende do modelo perceber sozinho
+o número no meio da tabela -- só dispara pra ACWR alto (>1.3), nunca pra
+ACWR baixo (destreino não é risco de sobrecarga).
 **Critérios de aceite:**
-- [ ] Relatório inclui pelo menos uma recomendação concreta de treino (tipo, distância/duração alvo, intensidade).
-- [ ] Relatório sinaliza explicitamente quando o ACWR (carga aguda/carga crônica) sai da zona segura 0.8–1.3, com alerta reforçado acima de 1.5 (guardrail de sobrecarga, ver seção 6.1).
-- [ ] Chave da API vem de variável de ambiente, nunca hardcoded.
+- [x] Relatório inclui pelo menos uma recomendação concreta de treino (tipo da lista `tipo_treino`, distância/duração alvo, intensidade) -- garantido pela instrução do prompt (não validado estruturalmente ainda).
+- [x] Relatório sinaliza explicitamente quando o ACWR sai da zona segura acima de 1.3, com alerta reforçado acima de 1.5 (guardrail de sobrecarga, ver seção 6.1) -- implementado como instrução obrigatória injetada pelo Python, testado com dado real (dispara/não dispara conforme esperado).
+- [x] Chave da API vem de variável de ambiente (`GEMINI_API_KEY`), nunca hardcoded.
+- [ ] Chamada real ao Gemini testada ponta a ponta -- pendente da geração da chave da API.
 
 ### Fase 8 — Orquestração (GitHub Actions)
 **Requisitos:** `sync_atividades.yml` (schedule, ex. a cada 2-3h),
@@ -559,3 +634,19 @@ Decisões da sessão de 2026-08-14, para referência futura:
   da Garmin, sem nenhum cálculo adicional — ver seção 6.1 pra por que a
   regra de classificação da Garmin em si não é pública, então não há como
   fazer melhor que confiar no rótulo que ela já decidiu.
+- **`vw_sessoes.tipo_treino` (nova coluna, prep pra Fase 7)**: o prompt da
+  Fase 7 precisava de um vocabulário de tipo de treino específico o
+  bastante pra soar como um treinador de verdade (Rodagem, Tiro,
+  Intervalado, Fartlek, etc.), não só o rótulo genérico da Garmin. Decisão
+  explícita do usuário: essa classificação tem que ser **código
+  determinístico testável**, não uma instrução solta no prompt esperando
+  que o LLM infira sozinho. Adotado o sistema de Jack Daniels (seção 6.1)
+  classificado por % de tempo por zona de FC + efeito anaeróbico — mesmo
+  cuidado do item acima: **não** usar estrutura de split (RWD_RUN/
+  RWD_WALK) como sinal de intensidade, porque o método run-walk faz
+  sessões de intensidade bem diferente parecerem estruturalmente
+  parecidas. Testado contra o histórico real do usuário antes de virar
+  código definitivo — validado como coerente com o esforço percebido de
+  cada sessão. `classificacao_atividade` continua existindo (usada pelo
+  dashboard da Fase 6); `tipo_treino` substitui ela em `vw_sessoes_ia`
+  por ser estritamente mais específica pro propósito da Fase 7.
