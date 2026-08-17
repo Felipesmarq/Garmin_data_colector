@@ -382,6 +382,53 @@ original ao pé da letra.
 
 **Fontes:** [Daniels' Running Formula — resumo (Fellrnr)](https://fellrnr.com/wiki/Jack_Daniels) · [Jack Daniels' Running Intensity — Coach Ray](https://www.coachray.nz/2023/05/03/jack-daniels-running-intensity/) · [Fartlek — Wikipedia](https://en.wikipedia.org/wiki/Fartlek) · [Tipos de treino de corrida em português — Corrida Perfeita](https://www.corridaperfeita.com/treinos-de-corrida-intervalado-fartlek-de-ritmo-e-educativo/)
 
+### Composição da semana — por que o plano gerado variava demais entre execuções
+
+Pesquisa feita em 2026-08-14/15 depois de observar, na prática, que
+gerações sucessivas do plano semanal (mesmos dados de entrada, sem
+mudança real na semana) produziam estruturas bem diferentes entre si —
+ora 1 treino de intensidade, ora 2, sem critério fixo. O prompt até
+então descrevia os tipos de treino disponíveis, mas não restringia
+*quantos* de cada tipo cabem numa semana nem *em que ordem* — deixava
+essa decisão inteiramente a critério do LLM a cada chamada, que é
+exatamente o tipo de grau de liberdade que gera variação arbitrária
+entre execuções.
+
+**Distribuição polarizada (Seiler & Kjerland, 2006, *Scandinavian
+Journal of Medicine & Science in Sports*):** atletas de endurance de
+elite treinam, na prática, ~80% do tempo em baixa intensidade e ~20%
+em alta intensidade — não uma mistura de intensidade média (os
+chamados "junk miles"), mas uma distribuição bimodal. Adotado como
+regra fixa no prompt (`REGRAS_COMPOSICAO_SEMANA`,
+`src/analyze/analisar_com_ia.py`): no máximo 1 treino de intensidade
+(Ritmo, Limiar, Intervalado ou Tiro) por semana, o resto tem que ser
+Rodagem/Recuperação ou Longão.
+
+**Alternância hard/easy:** princípio clássico de treinamento
+(popularizado por Bill Bowerman, ainda referência corrente) — nunca
+dois dias de esforço seguidos sem pelo menos 1 dia de descanso entre
+eles. Evita empilhar estímulo sem recuperação suficiente entre um
+treino forte e o próximo.
+
+**Guardrail de dor — progressão sessão a sessão, não só carga semanal
+agregada:** o ACWR (seção acima) já cobre risco de sobrecarga na
+carga *agregada* da semana, mas não decide se a *intensidade* deveria
+avançar dado o que aconteceu na sessão mais recente especificamente.
+Protocolos de retomada pós-MTSS/canelite documentados em medicina
+esportiva seguem uma lógica de fases: avança intensidade só depois de
+sessões consecutivas sem dor; se a dor voltar, regride uma fase
+inteira. Implementado como segundo guardrail determinístico
+(`_instrucao_guardrail_dor`, mesmo padrão do guardrail de ACWR — Python
+calcula, prompt recebe instrução obrigatória, não sugestão): se a dor
+mais recente registrada em `stg_dor` for **nível 2 ou mais** (escala
+0-5), a semana inteira fica restrita a Rodagem/Recuperação ou Longão,
+nenhum tipo de intensidade — mesmo que o ACWR estivesse permitindo.
+Validado contra dado real: com dor recente = 2, o plano gerado zerou
+intensidade nos treinos da semana e moveu Intervalado/Tiro só pras
+`estimativas_futuras` (fora do plano em si), como esperado.
+
+**Fontes:** [Seiler & Kjerland (2006) — resumo do treino polarizado](https://bodyrecomposition.com/training/hard-days-hard-easy-days-easy) · [Princípio hard/easy — RunSpirited](https://www.runspirited.com/single-post/why-runners-should-embrace-hard-days-hard-easy-days-easy) · [Protocolo de retomada em 6 fases pós-shin splints — Ubie Doctor's Note](https://ubiehealth.com/doctors-note/shin-splints-treatments-return-running-protocol-5762q2) · [Medial Tibial Stress Syndrome — Physiopedia](https://www.physio-pedia.com/Medial_Tibial_Stress_Syndrome)
+
 ### Dinâmica de corrida — cadência, tempo de contato com solo, oscilação vertical, comprimento de passada
 
 Tempo de contato com solo (GCT) tem correlação forte com economia de corrida
@@ -492,19 +539,32 @@ Autenticação via service account do Google Cloud
 `vw_sessoes_ia` (últimas `JANELA_SEMANAS` = 4 semanas, mesma unidade da
 carga crônica do ACWR) + `vw_resumo_semanal`; chamada ao LLM isolada numa
 função única (`gerar_analise(prompt) -> texto`) para permitir trocar de
-provedor sem reescrever o resto. Saída é o **plano da semana** (dia a
-dia, incluindo descanso), não uma recomendação avulsa de próxima sessão —
-usa o vocabulário fechado de `tipo_treino` (seção 6.1) tanto pro
-histórico quanto pra recomendação, pra soar como um treinador de verdade
-em vez de sugestão genérica. Guardrail de ACWR é determinístico em
-Python (`_instrucao_guardrail`), não depende do modelo perceber sozinho
-o número no meio da tabela -- só dispara pra ACWR alto (>1.3), nunca pra
-ACWR baixo (destreino não é risco de sobrecarga).
+provedor sem reescrever o resto -- devolve JSON validado contra o schema
+`PlanoSemanal` (`response_schema` do Gemini), não texto livre, pra dar
+pra inserir direto na planilha sem parsing frágil. Saída é o **plano da
+semana** (exatamente 7 dias, Segunda a Domingo, incluindo descanso;
+datas calculadas em Python via `_proxima_semana`, nunca confiadas ao
+LLM) -- usa o vocabulário fechado de `tipo_treino` (seção 6.1) tanto pro
+histórico quanto pra recomendação. Escrito na aba "Plano da Semana"
+(`escrever_plano`) em modo **append-only**, idempotente por data da
+segunda-feira -- cada semana é um registro histórico que se acumula, não
+um snapshot pra sobrescrever (diferente do dashboard da Fase 6).
+
+Dois guardrails determinísticos em Python, não uma aposta em o modelo
+perceber sozinho: `_instrucao_guardrail_acwr` (carga semanal agregada,
+só dispara acima de 1.3, nunca pra ACWR baixo) e
+`_instrucao_guardrail_dor` (progressão sessão a sessão -- trava
+intensidade se a dor mais recente registrada foi >= 2, protocolo de
+retomada pós-canelite, seção 6.1). `REGRAS_COMPOSICAO_SEMANA`
+(distribuição polarizada 80/20 + alternância hard/easy, seção 6.1)
+reduz a variação arbitrária de estrutura da semana entre gerações
+sucessivas com os mesmos dados de entrada.
 **Critérios de aceite:**
-- [x] Relatório inclui pelo menos uma recomendação concreta de treino (tipo da lista `tipo_treino`, distância/duração alvo, intensidade) -- garantido pela instrução do prompt (não validado estruturalmente ainda).
-- [x] Relatório sinaliza explicitamente quando o ACWR sai da zona segura acima de 1.3, com alerta reforçado acima de 1.5 (guardrail de sobrecarga, ver seção 6.1) -- implementado como instrução obrigatória injetada pelo Python, testado com dado real (dispara/não dispara conforme esperado).
+- [x] Relatório inclui pelo menos uma recomendação concreta de treino (tipo da lista `tipo_treino`, distância/duração alvo, intensidade) -- garantido estruturalmente pelo `response_schema`, não só por instrução de texto.
+- [x] Relatório sinaliza explicitamente quando o ACWR sai da zona segura acima de 1.3, com alerta reforçado acima de 1.5 (guardrail de sobrecarga, ver seção 6.1) -- testado com dado real (dispara/não dispara conforme esperado).
 - [x] Chave da API vem de variável de ambiente (`GEMINI_API_KEY`), nunca hardcoded.
-- [ ] Chamada real ao Gemini testada ponta a ponta -- pendente da geração da chave da API.
+- [x] Chamada real ao Gemini testada ponta a ponta -- validada múltiplas vezes com dado real, incluindo os dois guardrails disparando juntos.
+- [x] Escrita na planilha é idempotente (rodar 2x na mesma semana não duplica linha) -- testado.
 
 ### Fase 8 — Orquestração (GitHub Actions)
 **Requisitos:** `sync_atividades.yml` (schedule, ex. a cada 2-3h),
