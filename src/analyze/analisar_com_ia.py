@@ -39,7 +39,7 @@ from src.planilha import conectar as conectar_planilha, inserir_linhas, obter_ab
 ROOT = Path(__file__).resolve().parent.parent.parent
 
 JANELA_SEMANAS = 4
-MODELO_PADRAO = "gemini-2.5-flash"
+MODELO_PADRAO = "gemini-3.5-flash"
 
 DIAS_SEMANA_PT = ["Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado", "Domingo"]
 
