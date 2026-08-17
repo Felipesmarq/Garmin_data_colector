@@ -132,6 +132,19 @@ CREATE TABLE IF NOT EXISTS stg_dor (
 -- como coluna física.
 -- =====================================================================
 CREATE OR REPLACE VIEW vw_sessoes AS
+WITH zonas AS (
+    -- % de tempo por faixa de zona de FC, usado por tipo_treino abaixo.
+    -- "baixa" = zonas 1-2, "media" = zona 3, "alta" = zonas 4-5.
+    SELECT
+        activity_id,
+        COALESCE(tempo_zona_fc_1,0) + COALESCE(tempo_zona_fc_2,0)
+            + COALESCE(tempo_zona_fc_3,0) + COALESCE(tempo_zona_fc_4,0)
+            + COALESCE(tempo_zona_fc_5,0) AS total,
+        COALESCE(tempo_zona_fc_1,0) + COALESCE(tempo_zona_fc_2,0) AS baixa,
+        COALESCE(tempo_zona_fc_3,0) AS media,
+        COALESCE(tempo_zona_fc_4,0) + COALESCE(tempo_zona_fc_5,0) AS alta
+    FROM stg_atividades
+)
 SELECT
     a.activity_id,
     a.data,
@@ -199,8 +212,27 @@ SELECT
     CASE
         WHEN a.efeito_treino_label = 'UNKNOWN' THEN 'CAMINHADA'
         ELSE a.efeito_treino_label
-    END AS classificacao_atividade
+    END AS classificacao_atividade,
+    -- tipo_treino: classifica a atividade no vocabulário de Daniels
+    -- (Rodagem/Longão/Ritmo/Limiar/Intervalado/Tiro -- ver seção 6.1 do
+    -- case pra fonte e racional) usando % de tempo por zona de FC +
+    -- efeito anaeróbico como sinal de intensidade -- não a estrutura de
+    -- splits (RWD_RUN/RWD_WALK). Validado contra dado real em 2026-08-14:
+    -- treino run-walk de recuperação passa a maior parte do tempo em
+    -- RWD_WALK só por estrutura, não por ser de baixa intensidade -- então
+    -- estrutura de split classificaria errado; zona de FC não.
+    CASE
+        WHEN a.efeito_treino_label = 'UNKNOWN' THEN 'Caminhada'
+        WHEN z.total IS NULL OR z.total = 0 THEN 'Rodagem/Recuperação'
+        WHEN a.efeito_treino_anaerobico >= 1.5 AND z.alta / z.total >= 0.3
+            THEN CASE WHEN a.duracao_seg / 60.0 < 20 THEN 'Tiro' ELSE 'Intervalado' END
+        WHEN z.alta / z.total >= 0.40 THEN 'Limiar'
+        WHEN z.alta / z.total >= 0.20 OR z.media / z.total >= 0.30 THEN 'Ritmo'
+        WHEN z.baixa / z.total >= 0.85 AND a.duracao_seg / 60.0 >= 35 THEN 'Longão'
+        ELSE 'Rodagem/Recuperação'
+    END AS tipo_treino
 FROM stg_atividades a
+LEFT JOIN zonas z ON z.activity_id = a.activity_id
 LEFT JOIN (
     SELECT
         activity_id,
@@ -214,7 +246,7 @@ LEFT JOIN stg_dor d ON d.activity_id = a.activity_id;
 
 -- =====================================================================
 -- VIEW: vw_sessoes_ia — subconjunto curado de vw_sessoes, é o que
--- efetivamente vira prompt da IA (Fase 6). Contexto irrelevante mede-se
+-- efetivamente vira prompt da IA (Fase 7). Contexto irrelevante mede-se
 -- em degradação de raciocínio do LLM (ver CASE_DO_PROJETO_1.md seção
 -- 6.1), então aqui só entra o que tem sinal pra geração de treino ou pro
 -- guardrail de sobrecarga -- não é "menos dado", é dado com propósito.
@@ -245,7 +277,14 @@ SELECT
     potencia_normalizada,
     efeito_treino_aerobico,
     efeito_treino_anaerobico,
-    efeito_treino_label,
+    -- tipo_treino (Rodagem/Ritmo/Limiar/Intervalado/Tiro/Longão/Caminhada,
+    -- ver vw_sessoes e case seção 6.1), não classificacao_atividade nem
+    -- efeito_treino_label bruto -- é o vocabulário que o prompt da Fase 7
+    -- usa pra recomendar a semana, então usar o mesmo vocabulário pra
+    -- descrever o que já foi feito fecha o elo entre histórico e
+    -- recomendação. Repetir classificacao_atividade aqui também seria
+    -- sinal redundante, contra o princípio de curadoria desta view.
+    tipo_treino,
     tempo_zona_fc_1, tempo_zona_fc_2, tempo_zona_fc_3, tempo_zona_fc_4, tempo_zona_fc_5,
     tempo_contato_solo_medio,
     comprimento_passada_medio,
