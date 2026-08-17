@@ -4,11 +4,16 @@
 LLM -- trocar de Gemini pra outro provedor é reescrever só essa função (ver
 CASE_DO_PROJETO_1.md seção 4).
 
-O guardrail de ACWR (seção 6.1) não depende do modelo "perceber" o risco de
-sobrecarga sozinho: `_instrucao_guardrail` calcula a partir do ACWR real
-(vw_resumo_semanal) e injeta uma instrução obrigatória no prompt quando a
-semana atual sai da zona segura 0.8-1.3 -- determinístico, não uma aposta em
-o LLM notar um número no meio da tabela.
+Dois guardrails (seção 6.1) não dependem do modelo "perceber" risco
+sozinho -- ambos calculados em Python e injetados como instrução
+obrigatória no prompt, não uma aposta em o LLM notar um número no meio da
+tabela: `_instrucao_guardrail_acwr` (carga semanal agregada, dispara fora
+da zona segura 0.8-1.3) e `_instrucao_guardrail_dor` (progressão sessão a
+sessão -- trava intensidade se a dor mais recente registrada foi >= 2,
+seguindo protocolo de retomada pós-canelite). Regras de composição da
+semana (REGRAS_COMPOSICAO_SEMANA -- distribuição polarizada 80/20 e
+alternância hard/easy) existem especificamente pra reduzir variação
+arbitrária entre gerações sucessivas do plano.
 
 Janela de contexto: 4 semanas (JANELA_SEMANAS) -- mesma unidade que a carga
 crônica do ACWR já usa (mesociclo padrão na ciência do esporte) e evita
@@ -18,19 +23,25 @@ fácil de ajustar/testar, não uma verdade definitiva.
 """
 
 import os
+from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 
 import psycopg
 from dotenv import load_dotenv
 from google import genai
+from google.genai import types
+from pydantic import BaseModel
 
 from src.db import conectar
+from src.planilha import conectar as conectar_planilha, inserir_linhas, obter_aba
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 
 JANELA_SEMANAS = 4
 MODELO_PADRAO = "gemini-2.5-flash"
+
+DIAS_SEMANA_PT = ["Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado", "Domingo"]
 
 ZONA_SEGURA_MIN = 0.8
 ZONA_SEGURA_MAX = 1.3
@@ -52,6 +63,41 @@ TIPOS_DE_TREINO = """\
 - Tiro (Repetition, acima de 100% VO2max, ritmo de milha): repetições curtas com recuperação completa -- potência anaeróbica, velocidade, economia de corrida.
 - Fartlek (intensidade variável, sem estrutura fixa): variação livre de ritmo, recuperação em trote leve (não parado) -- mistura estímulo aeróbico/anaeróbico.\
 """
+
+
+class TreinoDia(BaseModel):
+    dia_semana: str  # "Segunda".."Domingo", só pra o modelo se situar -- a data real é atribuída em Python (_proxima_semana), nunca confiada ao LLM
+    descanso: bool
+    tipo_treino: str | None = None  # da lista TIPOS_DE_TREINO, ou None se descanso
+    distancia_km: float | None = None
+    duracao_min: float | None = None
+    pace_alvo: str | None = None  # "10:52-12:29 min/km"
+    fc_alvo: str | None = None  # "123-133 bpm"
+    motivo: str
+
+
+class EstimativaFutura(BaseModel):
+    """Tipos de treino sem histórico do corredor ainda (ex. Intervalado,
+    Tiro) -- referência pra quando ele for tentar, não faz parte do plano
+    da semana em si."""
+    tipo_treino: str
+    pace_alvo: str
+    fc_alvo: str
+    nota: str
+
+
+class PlanoSemanal(BaseModel):
+    dias: list[TreinoDia]
+    estimativas_futuras: list[EstimativaFutura] = []
+    logica_geral: str
+
+
+def _proxima_semana() -> list[date]:
+    """Segunda a domingo da próxima semana ISO -- calculado em Python, não
+    pedido ao LLM (aritmética de data não é trabalho pra prompt)."""
+    hoje = date.today()
+    proxima_segunda = hoje + timedelta(days=7 - hoje.weekday())
+    return [proxima_segunda + timedelta(days=i) for i in range(7)]
 
 
 def _consultar(con: psycopg.Connection, sql: str, params: tuple = ()) -> tuple[list[str], list[tuple]]:
@@ -125,7 +171,7 @@ def _acwr_semana_atual(colunas: list[str], linhas_resumo: list[tuple]) -> float 
     return float(valor) if valor is not None else None
 
 
-def _instrucao_guardrail(acwr: float | None) -> str:
+def _instrucao_guardrail_acwr(acwr: float | None) -> str:
     """Só dispara pra ACWR alto -- a pesquisa (seção 6.1 do case) documenta
     risco de lesão especificamente acima da zona segura. ACWR abaixo de 0.8
     é destreino, não risco de sobrecarga; não é caso de guardrail."""
@@ -133,27 +179,76 @@ def _instrucao_guardrail(acwr: float | None) -> str:
         return ""
     if acwr > ZONA_ALERTA_REFORCADO:
         return (
-            f"ALERTA OBRIGATÓRIO: o ACWR desta semana é {acwr:.2f}, acima do limiar de risco "
-            f"alto (1.5) -- pesquisa (Gabbett, 2016) mostra 2-4x mais chance de lesão na semana "
-            f"seguinte nessa faixa. Comece a resposta com um alerta explícito de risco de "
-            f"sobrecarga e recomende redução de volume/intensidade nesta semana, priorizando "
-            f"recuperação em vez de qualquer aumento de carga."
+            f"ALERTA OBRIGATÓRIO (carga semanal): o ACWR desta semana é {acwr:.2f}, acima do "
+            f"limiar de risco alto (1.5) -- pesquisa (Gabbett, 2016) mostra 2-4x mais chance de "
+            f"lesão na semana seguinte nessa faixa. Comece a resposta com um alerta explícito de "
+            f"risco de sobrecarga e recomende redução de volume/intensidade nesta semana, "
+            f"priorizando recuperação em vez de qualquer aumento de carga."
         )
     return (
-        f"ALERTA OBRIGATÓRIO: o ACWR desta semana é {acwr:.2f}, fora da zona segura "
-        f"(0.8-1.3). Mencione isso explicitamente na resposta antes de sugerir qualquer "
+        f"ALERTA OBRIGATÓRIO (carga semanal): o ACWR desta semana é {acwr:.2f}, fora da zona "
+        f"segura (0.8-1.3). Mencione isso explicitamente na resposta antes de sugerir qualquer "
         f"aumento de volume ou intensidade."
     )
 
 
+LIMIAR_DOR_GUARDRAIL = 2
+
+
+def _dor_mais_recente(colunas: list[str], linhas: list[tuple]) -> int | None:
+    """Dor da atividade mais recente com dor registrada -- linhas já vêm em
+    ordem cronológica ASC (ORDER BY data), percorre do fim pro início e
+    pula quem ainda não tem dor preenchida (None != "sem dor")."""
+    idx_dor = colunas.index("dor")
+    for linha in reversed(linhas):
+        if linha[idx_dor] is not None:
+            return int(linha[idx_dor])
+    return None
+
+
+def _instrucao_guardrail_dor(dor: int | None) -> str:
+    """Progressão de intensidade sessão a sessão, não só carga agregada da
+    semana (isso já é o ACWR) -- protocolo de retomada pós-MTSS/canelite:
+    só avança intensidade depois de sessões consecutivas sem dor; se a dor
+    voltar, regride. Determinístico igual o guardrail de ACWR -- não é uma
+    sugestão que o LLM pode ignorar."""
+    if dor is None or dor < LIMIAR_DOR_GUARDRAIL:
+        return ""
+    return (
+        f"ALERTA OBRIGATÓRIO (dor recente): a dor mais recente registrada foi nível {dor} "
+        f"(escala 0-5). Protocolo de retomada pós-canelite: intensidade só avança depois de "
+        f"sessões consecutivas sem dor. Como {dor} >= {LIMIAR_DOR_GUARDRAIL}, esta semana só "
+        f"pode conter treinos de Rodagem/Recuperação ou Longão -- nenhum Ritmo, Limiar, "
+        f"Intervalado, Tiro ou Fartlek, mesmo que o ACWR permita."
+    )
+
+
+REGRAS_COMPOSICAO_SEMANA = (
+    "- Distribuição polarizada (Seiler & Kjerland, 2006 -- padrão observado em atletas de "
+    "endurance de elite): no máximo 1 treino de intensidade (Ritmo, Limiar, Intervalado ou "
+    "Tiro) por semana. Todos os outros dias de corrida têm que ser Rodagem/Recuperação ou "
+    "Longão. Isso é regra fixa, não sugestão -- não decida o número de treinos fortes "
+    "livremente a cada vez.\n"
+    "- Alternância hard/easy: nunca dois dias de corrida seguidos sem pelo menos 1 dia de "
+    "descanso entre eles."
+)
+
+
 def _construir_prompt(
-    atividades_txt: str, resumo_txt: str, faixas_txt: str, instrucao_guardrail: str
+    atividades_txt: str,
+    resumo_txt: str,
+    faixas_txt: str,
+    instrucoes_guardrail: list[str],
+    dias: list[date],
 ) -> str:
+    dias_txt = ", ".join(f"{nome} {d.strftime('%d/%m')}" for nome, d in zip(DIAS_SEMANA_PT, dias))
     partes = [
         "Você é o treinador de um corredor recreacional em retomada gradual após um "
         "episódio de canelite (síndrome do estresse tibial medial). Analise os dados "
         "objetivos de treino (relógio Garmin) abaixo e monte o plano da próxima semana "
         "de treino, como um treinador de verdade faria -- não uma sugestão genérica.",
+        "",
+        f"A próxima semana é: {dias_txt}.",
         "",
         "Objetivo: um plano que marque evolução -- sem repetir o padrão de sobrecarga "
         "que já causou lesão antes. Evolução é o objetivo; não-sobrecarga é uma "
@@ -165,6 +260,11 @@ def _construir_prompt(
         "corredor não consegue medir VO2max correndo, então NUNCA comunique a "
         "intensidade em %VO2max pra ele:",
         TIPOS_DE_TREINO,
+        "",
+        "Regras obrigatórias de composição da semana (baseadas em evidência, não "
+        "opcionais -- servem justamente pra você não variar a estrutura da semana de "
+        "forma arbitrária a cada geração):",
+        REGRAS_COMPOSICAO_SEMANA,
         "",
         "Pace e FC que o próprio corredor já demonstrou pra cada tipo de treino nas "
         "últimas semanas (dado real dele, não tabela genérica) -- use isso pra dar o "
@@ -179,30 +279,136 @@ def _construir_prompt(
         "risco alto acima de 1.5):",
         resumo_txt,
     ]
-    if instrucao_guardrail:
-        partes += ["", instrucao_guardrail]
+    for instrucao in instrucoes_guardrail:
+        partes += ["", instrucao]
     partes += [
         "",
-        "Responda em português. Monte o plano dia a dia da próxima semana (marque "
-        "explicitamente os dias de descanso também), e pra cada treino informe: tipo "
-        "(da lista acima), distância ou duração alvo, **pace alvo em min/km e FC alvo "
-        "em bpm** (nunca %VO2max), e uma frase curta do porquê desse treino nesse "
-        "momento, com base nos dados. Pra tipo de treino sem histórico do corredor "
-        "ainda, estime a partir do que ele já demonstrou nos tipos mais próximos "
-        "(ex. Limiar é mais rápido que Ritmo) e avise que é uma primeira estimativa, "
-        "a ajustar conforme sensação real. Termine com uma frase resumindo a lógica "
-        "geral da semana.",
+        "Responda em português. Monte o plano dia a dia da próxima semana, "
+        "**exatamente 7 dias, na ordem Segunda a Domingo, incluindo os dias de "
+        "descanso** (um item por dia, `descanso: true` e o resto dos campos nulos "
+        "nesse caso). Pra cada treino: tipo (da lista acima), distância ou duração "
+        "alvo, **pace alvo em min/km e FC alvo em bpm** (nunca %VO2max), e uma frase "
+        "curta do porquê desse treino nesse momento, com base nos dados. Pra tipo de "
+        "treino sem histórico do corredor ainda, pode sugerir mesmo sem estar no plano "
+        "da semana -- coloque em `estimativas_futuras`, estimando a partir do que ele "
+        "já demonstrou nos tipos mais próximos (ex. Limiar é mais rápido que Ritmo), "
+        "nunca dentro do plano da semana em si. Feche com uma frase em `logica_geral` "
+        "resumindo a lógica geral da semana.",
     ]
     return "\n".join(partes)
 
 
 def gerar_analise(prompt: str) -> str:
-    """Chamada ao LLM isolada nesta função -- ver docstring do módulo."""
+    """Chamada ao LLM isolada nesta função -- ver docstring do módulo.
+
+    Devolve texto (contrato genérico, ver seção 4 do case) -- só que aqui
+    esse texto é um JSON validado contra PlanoSemanal (response_schema),
+    não texto livre. `response_schema` é config específica do Gemini; fica
+    contida nesta função, então trocar de provedor continua sendo só
+    reescrever `gerar_analise`.
+    """
     load_dotenv(ROOT / ".env")
     cliente = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
     modelo = os.environ.get("GEMINI_MODEL", MODELO_PADRAO)
-    resposta = cliente.models.generate_content(model=modelo, contents=prompt)
+    resposta = cliente.models.generate_content(
+        model=modelo,
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            # não usamos tools/function calling -- desliga o AFC padrão pra
+            # não gerar o aviso "Direct use of AFC..." a cada chamada, sem
+            # efeito nenhum no resultado.
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+            response_mime_type="application/json",
+            response_schema=PlanoSemanal,
+        ),
+    )
+    if not resposta.candidates:
+        motivo = resposta.prompt_feedback.block_reason if resposta.prompt_feedback else "desconhecido"
+        raise RuntimeError(f"Gemini bloqueou o prompt antes de gerar resposta (motivo: {motivo}).")
+    finalizacao = resposta.candidates[0].finish_reason
+    if finalizacao not in (types.FinishReason.STOP, None) or not resposta.text:
+        raise RuntimeError(f"Gemini não completou a resposta (finish_reason={finalizacao}).")
     return resposta.text
+
+
+def _plano_semanal(texto_json: str) -> PlanoSemanal:
+    """Parse + validação do JSON devolvido por gerar_analise -- separado da
+    chamada em si, pra ficar provider-agnostic (qualquer LLM que devolva
+    esse formato funciona aqui, não só Gemini)."""
+    plano = PlanoSemanal.model_validate_json(texto_json)
+    if len(plano.dias) != 7:
+        raise ValueError(f"Esperava 7 dias no plano, veio {len(plano.dias)}.")
+    return plano
+
+
+ABA_PLANO = "Plano da Semana"
+COR_PLANO = (0.55, 0.32, 0.78)  # roxo
+CABECALHO_PLANO = [
+    "dia_semana", "data", "tipo_treino", "distancia_km", "duracao_min",
+    "pace_alvo", "fc_alvo", "motivo",
+]
+
+
+def _linhas_plano(plano: PlanoSemanal, dias: list[date]) -> list[tuple]:
+    # dia_semana vem de DIAS_SEMANA_PT (índice), não de treino.dia_semana --
+    # esse campo é preenchido livremente pelo LLM e saiu inconsistente
+    # ("sábado" minúsculo em vez de "Sábado"); nome do dia é dado
+    # determinístico, não precisa confiar na IA pra isso.
+    #
+    # Linhas de estimativas_futuras/Resumo não têm um dia específico, mas
+    # levam a data da segunda-feira da semana (dias[0]) na coluna `data` --
+    # assim toda linha de uma mesma semana compartilha um valor filtrável
+    # em comum, útil pra agrupar/filtrar por semana depois.
+    semana_ref = str(dias[0])
+    linhas = [
+        (
+            nome_dia,
+            str(data),
+            "Descanso" if treino.descanso else treino.tipo_treino,
+            treino.distancia_km,
+            treino.duracao_min,
+            treino.pace_alvo,
+            treino.fc_alvo,
+            treino.motivo,
+        )
+        for nome_dia, treino, data in zip(DIAS_SEMANA_PT, plano.dias, dias)
+    ]
+    for est in plano.estimativas_futuras:
+        linhas.append(("", semana_ref, f"{est.tipo_treino} (estimativa futura)", None, None, est.pace_alvo, est.fc_alvo, est.nota))
+    linhas.append(("Resumo", semana_ref, "", None, None, None, None, plano.logica_geral))
+    return linhas
+
+
+def escrever_plano(spreadsheet, plano: PlanoSemanal, dias: list[date]) -> int:
+    """Append-only: cada semana é um registro histórico, não um estado
+    atual pra espelhar -- diferente de planilha_desempenho.py (dashboard),
+    aqui NÃO se usa sobrescrever(). Idempotente: se a segunda-feira dessa
+    semana já está na coluna `data`, não insere de novo."""
+    aba = obter_aba(spreadsheet, ABA_PLANO, CABECALHO_PLANO, cor=COR_PLANO)
+    idx_data = CABECALHO_PLANO.index("data") + 1  # col_values é 1-based
+    datas_existentes = set(aba.col_values(idx_data)[1:])
+    if str(dias[0]) in datas_existentes:
+        return 0
+    linhas = _linhas_plano(plano, dias)
+    inserir_linhas(aba, [["" if v is None else v for v in linha] for linha in linhas])
+    return len(linhas)
+
+
+def _imprimir_plano(plano: PlanoSemanal, dias: list[date]) -> None:
+    for nome_dia, treino, data in zip(DIAS_SEMANA_PT, plano.dias, dias):
+        if treino.descanso:
+            print(f"{nome_dia} ({data}): Descanso -- {treino.motivo}")
+            continue
+        alvo = f"{treino.distancia_km}km" if treino.distancia_km else f"{treino.duracao_min}min"
+        print(
+            f"{nome_dia} ({data}): {treino.tipo_treino} -- {alvo}, "
+            f"pace {treino.pace_alvo}, FC {treino.fc_alvo} -- {treino.motivo}"
+        )
+    if plano.estimativas_futuras:
+        print("\nEstimativas pra tipos ainda não tentados:")
+        for est in plano.estimativas_futuras:
+            print(f"  {est.tipo_treino}: pace {est.pace_alvo}, FC {est.fc_alvo} -- {est.nota}")
+    print(f"\nLógica da semana: {plano.logica_geral}")
 
 
 if __name__ == "__main__":
@@ -219,16 +425,29 @@ if __name__ == "__main__":
     linhas_resumo = list(reversed(linhas_resumo_desc))  # ordem cronológica pro prompt
 
     acwr_atual = _acwr_semana_atual(colunas_resumo, linhas_resumo)
-    instrucao = _instrucao_guardrail(acwr_atual)
-    if instrucao:
-        print(f"[guardrail ativado -- ACWR atual: {acwr_atual:.2f}]\n")
+    dor_recente = _dor_mais_recente(colunas_ativ, linhas_ativ)
+    instrucoes = [
+        i for i in (_instrucao_guardrail_acwr(acwr_atual), _instrucao_guardrail_dor(dor_recente)) if i
+    ]
+    if instrucoes:
+        print(f"[guardrail(s) ativado(s) -- ACWR atual: {acwr_atual}, dor recente: {dor_recente}]\n")
 
+    dias = _proxima_semana()
     prompt = _construir_prompt(
         _formatar_tabela(colunas_ativ, linhas_ativ),
         _formatar_tabela(colunas_resumo, linhas_resumo),
         _faixas_por_tipo(colunas_ativ, linhas_ativ),
-        instrucao,
+        instrucoes,
+        dias,
     )
-    print(gerar_analise(prompt))
+    plano = _plano_semanal(gerar_analise(prompt))
+    _imprimir_plano(plano, dias)
+
+    spreadsheet = conectar_planilha()
+    n = escrever_plano(spreadsheet, plano, dias)
+    if n:
+        print(f"\n[{n} linha(s) escrita(s) na aba '{ABA_PLANO}']")
+    else:
+        print(f"\n[plano da semana de {dias[0]} já estava na aba '{ABA_PLANO}', não duplicado]")
 
     con.close()
