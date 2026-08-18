@@ -1,0 +1,81 @@
+name: Sync atividades
+
+# Roda 1x/dia (Fase 8 -- ver CASE_DO_PROJETO_1.md seção 7). Horário em UTC:
+# GitHub Actions cron não entende fuso -- 21h BRT = 00h UTC do dia seguinte.
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-atividades
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      GARMIN_EMAIL: ${{ secrets.GARMIN_EMAIL }}
+      GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
+      GOOGLE_SHEETS_CREDENTIALS_PATH: .google_sheets_credentials.json
+      GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+
+      - name: Restaurar token da Garmin
+        run: |
+          mkdir -p .garmin_tokens
+          printf '%s' "$GARMIN_TOKEN" > .garmin_tokens/garmin_tokens.json
+        env:
+          GARMIN_TOKEN: ${{ secrets.GARMIN_TOKEN }}
+
+      - name: Restaurar credencial do Google Sheets
+        run: printf '%s' "$GOOGLE_SHEETS_CREDENTIALS_JSON" > .google_sheets_credentials.json
+        env:
+          GOOGLE_SHEETS_CREDENTIALS_JSON: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS_JSON }}
+
+      # Cada passo abaixo tenta de novo (2x, 60/30s de espera) antes de
+      # falhar de vez -- só aí o job falha e o GitHub manda o e-mail padrão
+      # de workflow agendado que falhou.
+      - name: Carregar atividades
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 10
+          max_attempts: 3
+          retry_wait_seconds: 60
+          command: python -m src.load.load_atividades
+
+      - name: Carregar recuperação
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 10
+          max_attempts: 3
+          retry_wait_seconds: 60
+          command: python -m src.load.load_recuperacao
+
+      - name: Sincronizar dor (planilha)
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 5
+          max_attempts: 3
+          retry_wait_seconds: 30
+          command: python -m src.load.load_dor
+
+      - name: Atualizar dashboard da planilha
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 5
+          max_attempts: 3
+          retry_wait_seconds: 30
+          command: python -m src.load.planilha_desempenho

@@ -1,0 +1,84 @@
+name: Análise semanal
+
+# Roda domingo à noite (Fase 8 -- ver CASE_DO_PROJETO_1.md seção 7). Sincroniza
+# atividades/recuperação/dor primeiro, na própria execução -- não depende do
+# horário do sync_atividades.yml ter rodado antes (evita o problema de a
+# análise pegar dado desatualizado por coincidência de cron).
+# 20h BRT domingo = 23h UTC domingo (dia da semana não muda de UTC-3 pra UTC
+# nesse horário, diferente do sync diário).
+on:
+  schedule:
+    - cron: "0 23 * * 0"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: analise-semanal
+  cancel-in-progress: false
+
+jobs:
+  analisar:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      GARMIN_EMAIL: ${{ secrets.GARMIN_EMAIL }}
+      GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
+      GOOGLE_SHEETS_CREDENTIALS_PATH: .google_sheets_credentials.json
+      GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+
+      - name: Restaurar token da Garmin
+        run: |
+          mkdir -p .garmin_tokens
+          printf '%s' "$GARMIN_TOKEN" > .garmin_tokens/garmin_tokens.json
+        env:
+          GARMIN_TOKEN: ${{ secrets.GARMIN_TOKEN }}
+
+      - name: Restaurar credencial do Google Sheets
+        run: printf '%s' "$GOOGLE_SHEETS_CREDENTIALS_JSON" > .google_sheets_credentials.json
+        env:
+          GOOGLE_SHEETS_CREDENTIALS_JSON: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS_JSON }}
+
+      - name: Carregar atividades
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 10
+          max_attempts: 3
+          retry_wait_seconds: 60
+          command: python -m src.load.load_atividades
+
+      - name: Carregar recuperação
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 10
+          max_attempts: 3
+          retry_wait_seconds: 60
+          command: python -m src.load.load_recuperacao
+
+      - name: Sincronizar dor (planilha)
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 5
+          max_attempts: 3
+          retry_wait_seconds: 30
+          command: python -m src.load.load_dor
+
+      - name: Gerar análise semanal
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 5
+          max_attempts: 3
+          retry_wait_seconds: 30
+          command: python -m src.analyze.analisar_com_ia
