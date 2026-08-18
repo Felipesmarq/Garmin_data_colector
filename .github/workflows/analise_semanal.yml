@@ -1,9 +1,11 @@
 name: Análise semanal
 
-# Roda domingo à noite (Fase 8 -- ver CASE_DO_PROJETO_1.md seção 7). Sincroniza
-# atividades/recuperação/dor primeiro, na própria execução -- não depende do
-# horário do sync_atividades.yml ter rodado antes (evita o problema de a
-# análise pegar dado desatualizado por coincidência de cron).
+# Roda domingo à noite (Fase 8 -- ver CASE_DO_PROJETO_1.md seção 7). O job
+# "sync" chama sync_atividades.yml como reusable workflow (workflow_call) em
+# vez de duplicar os mesmos 4 passos de carga de dado -- isso também resolve
+# o problema de a análise pegar dado desatualizado por coincidência de
+# horário: ela sincroniza na própria execução, não depende do cron diário já
+# ter rodado antes.
 # 20h BRT domingo = 23h UTC domingo (dia da semana não muda de UTC-3 pra UTC
 # nesse horário, diferente do sync diário).
 on:
@@ -19,7 +21,12 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  sync:
+    uses: ./.github/workflows/sync_atividades.yml
+    secrets: inherit
+
   analisar:
+    needs: sync
     runs-on: ubuntu-latest
     env:
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -30,11 +37,16 @@ jobs:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
     steps:
+      # Job novo, VM nova -- reusable workflow não compartilha filesystem
+      # entre jobs, então o ambiente (checkout, Python, token, credencial)
+      # precisa ser preparado de novo aqui. O que foi eliminado é a
+      # duplicação dos passos de carga de dado em si (job "sync" acima).
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: "pip"
 
       - name: Instalar dependências
         run: pip install -r requirements.txt
@@ -50,30 +62,6 @@ jobs:
         run: printf '%s' "$GOOGLE_SHEETS_CREDENTIALS_JSON" > .google_sheets_credentials.json
         env:
           GOOGLE_SHEETS_CREDENTIALS_JSON: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS_JSON }}
-
-      - name: Carregar atividades
-        uses: nick-fields/retry@v3
-        with:
-          timeout_minutes: 10
-          max_attempts: 3
-          retry_wait_seconds: 60
-          command: python -m src.load.load_atividades
-
-      - name: Carregar recuperação
-        uses: nick-fields/retry@v3
-        with:
-          timeout_minutes: 10
-          max_attempts: 3
-          retry_wait_seconds: 60
-          command: python -m src.load.load_recuperacao
-
-      - name: Sincronizar dor (planilha)
-        uses: nick-fields/retry@v3
-        with:
-          timeout_minutes: 5
-          max_attempts: 3
-          retry_wait_seconds: 30
-          command: python -m src.load.load_dor
 
       - name: Gerar análise semanal
         uses: nick-fields/retry@v3
