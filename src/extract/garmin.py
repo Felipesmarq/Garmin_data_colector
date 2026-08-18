@@ -60,6 +60,16 @@ def conectar() -> Garmin:
     email = os.getenv("GARMIN_EMAIL")
     senha_env = os.getenv("GARMIN_PASSWORD")
 
+    if os.getenv("GITHUB_ACTIONS") and not senha_env:
+        # Sem terminal no runner -- getpass/input travariam até o timeout do
+        # job (horas) em vez de falhar rápido. Token salvo (GARMIN_TOKEN
+        # Secret) é a via normal em CI; chegar aqui significa que ele
+        # expirou ou é inválido e precisa ser regerado localmente.
+        raise RuntimeError(
+            "Token da Garmin inválido/expirado e sem GARMIN_PASSWORD disponível -- "
+            "rode a autenticação localmente e atualize o Secret GARMIN_TOKEN."
+        )
+
     for tentativa in range(1, MAX_LOGIN_ATTEMPTS + 1):
         senha = senha_env if (tentativa == 1 and senha_env) else getpass.getpass(
             f"Senha da Garmin (tentativa {tentativa}/{MAX_LOGIN_ATTEMPTS}): "
