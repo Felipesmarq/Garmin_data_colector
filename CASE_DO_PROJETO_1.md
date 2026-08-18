@@ -567,16 +567,25 @@ sucessivas com os mesmos dados de entrada.
 - [x] Escrita na planilha é idempotente (rodar 2x na mesma semana não duplica linha) -- testado.
 
 ### Fase 8 — Orquestração (GitHub Actions)
-**Requisitos:** `sync_atividades.yml` (schedule, ex. a cada 2-3h),
-`sync_dor.yml` (ou incorporado ao `analise_semanal.yml` — roda
-`load_dor.py` antes de gerar a análise, pra pegar dor preenchida durante
-a semana) e `analise_semanal.yml` (schedule, domingo). Secrets: token
-Garmin, `DATABASE_URL`, chave Gemini, credencial da service account do
-Google Sheets.
+**Requisitos:** dois workflows, sem Docker (`actions/setup-python`,
+Python 3.12 -- decisão tomada nesta fase, ver seção 11): `sync_atividades.yml`
+(diário, 21h BRT -- carrega atividades, recuperação, sincroniza dor via
+`load_dor.py` e atualiza o dashboard via `planilha_desempenho.py`, tudo
+no mesmo workflow) e `analise_semanal.yml` (domingo, 20h BRT -- resincroniza
+atividades/recuperação/dor na própria execução, não depende do horário
+do sync diário ter rodado antes, e gera o plano via `analisar_com_ia.py`).
+Cada passo usa `nick-fields/retry` (até 3 tentativas) antes de falhar de
+vez, só aí o e-mail padrão do GitHub de workflow agendado que falhou
+dispara. Secrets: `GARMIN_EMAIL`, `GARMIN_PASSWORD` (fallback), `GARMIN_TOKEN`
+(token de sessão já autenticado -- ver seção 11 pra por que isso funciona
+sem senha/MFA a cada run), `DATABASE_URL`, `GOOGLE_SHEET_ID`,
+`GOOGLE_SHEETS_CREDENTIALS_JSON`, `GEMINI_API_KEY`, `GEMINI_MODEL`.
 **Critérios de aceite:**
-- [ ] Pipeline roda ponta a ponta sem intervenção manual por pelo menos 2 semanas seguidas.
-- [ ] Nenhum dado sensível (FC, sono, localização de dor) aparece em log do Actions.
-- [ ] Nenhum commit automático de dado é gerado pelo workflow.
+- [x] Workflows escritos e validados sintaticamente (`yaml.safe_load` sem erro, jobs corretos).
+- [x] `conectar()` (`extract/garmin.py`) falha rápido com mensagem clara em CI sem senha disponível, em vez de travar esperando `input()`/`getpass()` que nunca chega (runner não tem terminal).
+- [ ] Pipeline roda ponta a ponta sem intervenção manual por pelo menos 2 semanas seguidas -- pendente do usuário configurar os Secrets (comandos no README) e deixar rodar.
+- [ ] Nenhum dado sensível (FC, sono, localização de dor) aparece em log do Actions -- por design (Secrets são mascarados automaticamente pelo GitHub, nenhum script imprime valor de Secret), falta confirmar num run real.
+- [x] Nenhum commit automático de dado é gerado pelo workflow -- nenhum step chama `git commit`/`git push`, só leitura/escrita em Neon e Google Sheets.
 
 ### Fase 9 — Ajuste fino
 Frequência de polling, prompt, extras — a definir com base no uso real.
@@ -710,3 +719,47 @@ Decisões da sessão de 2026-08-14, para referência futura:
   cada sessão. `classificacao_atividade` continua existindo (usada pelo
   dashboard da Fase 6); `tipo_treino` substitui ela em `vw_sessoes_ia`
   por ser estritamente mais específica pro propósito da Fase 7.
+
+Decisões da sessão de 2026-08-17 (Fase 8), para referência futura:
+
+- **Token da Garmin: Secret estático, não cache do Actions**: pesquisado o
+  comportamento da lib (`garth`/`garminconnect`) -- o token OAuth1 dura
+  ~1 ano, e o token DI usado nas chamadas se auto-renova indefinidamente
+  enquanto o refresh token continuar válido, sem precisar de senha/MFA a
+  cada execução. Isso torna viável subir o token atual como Secret
+  (`GARMIN_TOKEN`) e escrevê-lo no arquivo a cada run, sem reautenticar.
+  Risco aceito conscientemente: não há confirmação de que o refresh token
+  da Garmin seja reutilizável (mesmo valor sempre válido) vs. rotativo
+  (cada renovação invalida o anterior) -- a documentação não é clara
+  nisso. Se for rotativo, o Secret pode parar de funcionar em algum
+  momento; mitigação é monitorar falhas (guardrail de `conectar()` abaixo)
+  e reautenticar localmente quando acontecer, não uma solução preventiva
+  mais robusta (ex. `actions/cache` auto-atualizável), que ficaria pra
+  Fase 9 se o problema realmente aparecer na prática.
+- **`conectar()` falha rápido em CI sem senha**: sem isso, um token
+  expirado em produção faria o código cair no loop de `getpass()`/
+  `input()` esperando senha/MFA -- num runner sem terminal, isso trava até
+  o timeout do job (podem ser horas) em vez de falhar em segundos com uma
+  mensagem acionável. Detecção via `GITHUB_ACTIONS` (variável que o
+  próprio Actions define em todo run).
+- **`actions/setup-python`, não Docker, na CI**: decisão que já vinha
+  sendo adiada desde a Fase 7 (ver discussão da época). Fechada a favor
+  do runner nativo -- mais simples, mais rápido (sem build de imagem a
+  cada execução), e o Dockerfile já existente continua servindo só pra
+  dev local, como o case sempre documentou.
+- **`analise_semanal.yml` resincroniza os próprios dados, não depende do
+  `sync_atividades.yml` ter rodado antes**: achado durante o desenho da
+  Fase 8 -- com sync diário às 21h BRT e análise domingo às 20h BRT, a
+  análise rodaria *antes* do sync daquele domingo (20h < 21h), pegando
+  dado de sábado em vez do fim de semana completo. Em vez de ajustar
+  horários pra evitar a coincidência (frágil -- quebra de novo se algum
+  horário mudar), a análise ganhou seus próprios passos de sync
+  (atividades, recuperação, dor) logo antes de chamar a IA -- correto
+  independente de quando o outro workflow rodou.
+- **Retry por passo (`nick-fields/retry`), não custom em Python**:
+  resiliência a falha transitória (rede, rate limit temporário) foi pedida
+  explicitamente pra não disparar e-mail de falha na primeira tentativa.
+  Implementado na camada de CI (Actions), não como loop de retry dentro
+  dos scripts Python -- mantém os scripts focados só na lógica de negócio,
+  e a política de quantas tentativas/quanto esperar fica declarativa no
+  YAML, fácil de ajustar sem tocar em código.

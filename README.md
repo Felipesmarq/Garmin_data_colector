@@ -108,9 +108,69 @@ preencher); depois importa de volta pra `stg_dor` (upsert por
 (snapshot de `vw_resumo_semanal`: km, variação %, ACWR) a cada execução —
 não acumula histórico duplicado, sempre reflete o estado atual do banco.
 
+### Fase 7 — análise semanal com IA (`analyze/analisar_com_ia.py`)
+
+Gera o plano de treino da próxima semana via Gemini a partir de
+`vw_sessoes_ia` + `vw_resumo_semanal`, com dois guardrails determinísticos
+(ACWR e dor recente) e a regra 80/20 injetados no prompt — ver
+`CASE_DO_PROJETO_1.md` seção 6.1. Precisa de `GEMINI_API_KEY` (gere em
+[aistudio.google.com/apikey](https://aistudio.google.com/apikey)) no `.env`.
+
+```bash
+docker compose run --rm garmin python -m src.analyze.analisar_com_ia
+```
+
+Imprime o plano no terminal e escreve na aba "Plano da Semana" da mesma
+planilha do Fase 6 -- **append-only**: cada semana gerada é um registro
+novo (idempotente por data da segunda-feira), não sobrescreve o histórico.
+
+### Fase 8 — automação (GitHub Actions)
+
+Dois workflows em `.github/workflows/`, sem Docker (roda com
+`actions/setup-python`, Python 3.12 direto no runner):
+
+- **`sync_atividades.yml`** — todo dia, 21h BRT (`0 0 * * *` UTC): carrega
+  atividades, recuperação, sincroniza dor e atualiza o dashboard da
+  planilha.
+- **`analise_semanal.yml`** — domingo, 20h BRT (`0 23 * * 0` UTC): resincroniza
+  atividades/recuperação/dor (não depende do horário do sync diário ter
+  rodado antes) e gera o plano da semana.
+
+Cada passo tenta de novo (até 3x) antes de falhar de vez -- só aí o
+GitHub manda o e-mail padrão de workflow agendado que falhou. Os dois
+também têm `workflow_dispatch` (botão "Run workflow" na aba Actions do
+GitHub, ou `gh workflow run <nome>.yml`), pra rodar manualmente sem
+esperar o horário.
+
+**Setup dos Secrets** (Settings → Secrets and variables → Actions no
+GitHub, ou via `gh` CLI autenticado -- roda isso localmente, na raiz do
+projeto, com o `.env` já preenchido):
+
+```bash
+gh secret set GARMIN_EMAIL --body "$(grep '^GARMIN_EMAIL=' .env | cut -d= -f2-)"
+gh secret set GARMIN_PASSWORD --body "$(grep '^GARMIN_PASSWORD=' .env | cut -d= -f2-)"
+gh secret set DATABASE_URL --body "$(grep '^DATABASE_URL=' .env | cut -d= -f2-)"
+gh secret set GOOGLE_SHEET_ID --body "$(grep '^GOOGLE_SHEET_ID=' .env | cut -d= -f2-)"
+gh secret set GEMINI_API_KEY --body "$(grep '^GEMINI_API_KEY=' .env | cut -d= -f2-)"
+gh secret set GEMINI_MODEL --body "$(grep '^GEMINI_MODEL=' .env | cut -d= -f2- | tr -d '\"')"
+gh secret set GARMIN_TOKEN < .garmin_tokens/garmin_tokens.json
+gh secret set GOOGLE_SHEETS_CREDENTIALS_JSON < .google_sheets_credentials.json
+```
+
+`GARMIN_TOKEN` é o conteúdo do token de sessão já autenticado localmente
+(dura ~1 ano, se renova sozinho sem senha/MFA -- ver seção 6.1 do case).
+`GARMIN_PASSWORD` é só um fallback: se o token falhar em produção, sem
+terminal interativo o workflow falha rápido com uma mensagem clara em vez
+de travar esperando input (`src/extract/garmin.py`, `conectar()`) --
+nesse caso, refaça o login local e rode o bloco de `gh secret set`
+de novo pra atualizar o `GARMIN_TOKEN`.
+
 ## Estrutura do projeto
 
 ```
+├── .github/workflows/
+│   ├── sync_atividades.yml     # diário, 21h BRT -- atividades + recuperação + dor + dashboard
+│   └── analise_semanal.yml     # domingo, 20h BRT -- resync + plano da semana via Gemini
 ├── explore/                    # scripts de investigação (Fase 0, fora do pipeline final)
 │   ├── inspect_garmin.py
 │   ├── output/                 # JSON bruto de amostra (gitignored)
@@ -119,12 +179,13 @@ não acumula histórico duplicado, sempre reflete o estado atual do banco.
 │   ├── db.py                   # conexão Postgres (Neon) + aplica schema.sql
 │   ├── planilha.py              # conexão Google Sheets + abas/linhas (mecânica genérica, sem regra de negócio)
 │   ├── extract/garmin.py       # puxa atividades (+ splits run/walk) e recuperação diária da API
-│   └── load/
-│       ├── schema.sql          # DDL: staging -> vw_sessoes -> vw_sessoes_ia -> vw_resumo_semanal
-│       ├── load_atividades.py  # upsert de atividades + splits
-│       ├── load_recuperacao.py
-│       ├── load_dor.py         # aba "Dor": exporta pendentes + importa preenchidas em stg_dor
-│       └── planilha_desempenho.py  # abas "Atividades"/"Resumo Semanal": snapshot somente-leitura
+│   ├── load/
+│   │   ├── schema.sql          # DDL: staging -> vw_sessoes -> vw_sessoes_ia -> vw_resumo_semanal
+│   │   ├── load_atividades.py  # upsert de atividades + splits
+│   │   ├── load_recuperacao.py
+│   │   ├── load_dor.py         # aba "Dor": exporta pendentes + importa preenchidas em stg_dor
+│   │   └── planilha_desempenho.py  # abas "Atividades"/"Resumo Semanal": snapshot somente-leitura
+│   └── analyze/analisar_com_ia.py  # plano semanal via Gemini + guardrails, aba "Plano da Semana"
 ├── Dockerfile · docker-compose.yml · .dockerignore  # só pra dev local, não usado em produção
 ├── requirements.txt · .env.example · .gitignore
 └── CASE_DO_PROJETO_1.md        # case completo do projeto
@@ -132,11 +193,13 @@ não acumula histórico duplicado, sempre reflete o estado atual do banco.
 
 ## Status
 
-Fases 0 a 5 implementadas e **validadas contra um banco Neon real**
-(schema aplicado, idempotência de `load_atividades`/`load_recuperacao`
-testada). Fase 6 (dor via planilha) implementada, aguardando setup da
-credencial do Google Sheets pra ser testada ponta a ponta. Faltam: Fase 7
-(análise com Gemini), Fase 8 (GitHub Actions), Fase 9 (ajuste fino).
+Fases 0 a 7 implementadas e **validadas contra o Neon e o Gemini reais**
+(schema aplicado, idempotência dos loaders testada, plano semanal gerado
+e escrito na planilha ponta a ponta, guardrails de ACWR/dor confirmados
+disparando). Fase 8 (GitHub Actions) com os workflows escritos e
+validados sintaticamente, pendente de: você configurar os Secrets
+(comandos acima) e deixar rodar pelo menos 2 semanas sem intervenção
+manual pra fechar o critério de aceite. Falta: Fase 9 (ajuste fino).
 Roadmap completo e critérios de aceite por fase na seção 7 do
 [`CASE_DO_PROJETO_1.md`](CASE_DO_PROJETO_1.md).
 
@@ -152,6 +215,11 @@ Roadmap completo e critérios de aceite por fase na seção 7 do
   um pouco ou use "Esqueci minha senha" no app da Garmin.
 - **Perdeu o login salvo**: apague `.garmin_tokens/` e rode de novo — ele
   pede email/senha e recria o token.
+- **Workflow do GitHub Actions falha com "Token da Garmin inválido/expirado"**:
+  o `GARMIN_TOKEN` (Secret) expirou ou foi revogado. Rode `docker compose
+  run --rm garmin python -m src.extract.garmin` localmente pra reautenticar
+  (recria `.garmin_tokens/garmin_tokens.json`), depois rode de novo o bloco
+  de `gh secret set` (seção Fase 8) pra atualizar o Secret.
 
 ## Dados sensíveis
 
