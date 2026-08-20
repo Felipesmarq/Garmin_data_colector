@@ -23,10 +23,13 @@ fácil de ajustar/testar, não uma verdade definitiva.
 """
 
 import os
+import smtplib
 from datetime import date, timedelta
 from decimal import Decimal
+from email.message import EmailMessage
 from pathlib import Path
 
+import gspread
 import psycopg
 from dotenv import load_dotenv
 from google import genai
@@ -83,6 +86,7 @@ class EstimativaFutura(BaseModel):
     tipo_treino: str
     pace_alvo: str
     fc_alvo: str
+    prazo_estimado: str  # critério/tempo explícito pra chegar lá, não "no futuro"
     nota: str
 
 
@@ -163,6 +167,34 @@ def _faixas_por_tipo(colunas: list[str], linhas: list[tuple]) -> str:
     return "\n".join(linhas_txt)
 
 
+ABA_OBSERVACOES = "Observações"
+COR_OBSERVACOES = (0.85, 0.60, 0.10)  # âmbar
+CABECALHO_OBSERVACOES = ["semana_inicio", "observacao"]
+
+
+def _observacoes_recentes(spreadsheet: gspread.Spreadsheet) -> str:
+    """Aba "Observações" -- texto livre por semana, preenchido manualmente
+    pelo usuário (nunca escrita pelo script, só lida). Cria a aba com
+    cabeçalho na primeira vez se ainda não existir; não insere linha
+    nenhuma -- é 100% input manual, mesmo espírito da aba "Dor" mas sem a
+    parte de export."""
+    aba = obter_aba(spreadsheet, ABA_OBSERVACOES, CABECALHO_OBSERVACOES, cor=COR_OBSERVACOES)
+    corte = date.today() - timedelta(weeks=JANELA_SEMANAS)
+    recentes = []
+    for registro in aba.get_all_records():
+        semana_txt = str(registro.get("semana_inicio", "")).strip()
+        observacao = str(registro.get("observacao", "")).strip()
+        if not semana_txt or not observacao:
+            continue
+        try:
+            semana = date.fromisoformat(semana_txt)
+        except ValueError:
+            continue
+        if semana >= corte:
+            recentes.append(f"- semana de {semana_txt}: {observacao}")
+    return "\n".join(recentes) if recentes else "(nenhuma observação registrada nas últimas semanas)"
+
+
 def _acwr_semana_atual(colunas: list[str], linhas_resumo: list[tuple]) -> float | None:
     """linhas_resumo já em ordem cronológica -- a última é a semana mais recente."""
     if not linhas_resumo:
@@ -238,6 +270,7 @@ def _construir_prompt(
     atividades_txt: str,
     resumo_txt: str,
     faixas_txt: str,
+    observacoes_txt: str,
     instrucoes_guardrail: list[str],
     dias: list[date],
 ) -> str:
@@ -278,6 +311,11 @@ def _construir_prompt(
         "Resumo semanal (km, ACWR = Acute:Chronic Workload Ratio, zona segura 0.8-1.3, "
         "risco alto acima de 1.5):",
         resumo_txt,
+        "",
+        "Observações do próprio corredor sobre as semanas recentes (texto livre, "
+        "escrito por ele -- pode conter contexto que os números não capturam, tipo "
+        "cansaço, viagem, mudança de rotina):",
+        observacoes_txt,
     ]
     for instrucao in instrucoes_guardrail:
         partes += ["", instrucao]
@@ -290,10 +328,16 @@ def _construir_prompt(
         "alvo, **pace alvo em min/km e FC alvo em bpm** (nunca %VO2max), e uma frase "
         "curta do porquê desse treino nesse momento, com base nos dados. Pra tipo de "
         "treino sem histórico do corredor ainda, pode sugerir mesmo sem estar no plano "
-        "da semana -- coloque em `estimativas_futuras`, estimando a partir do que ele "
-        "já demonstrou nos tipos mais próximos (ex. Limiar é mais rápido que Ritmo), "
-        "nunca dentro do plano da semana em si. Feche com uma frase em `logica_geral` "
-        "resumindo a lógica geral da semana.",
+        "da semana -- coloque em `estimativas_futuras`, estimando pace/FC a partir do "
+        "que ele já demonstrou nos tipos mais próximos (ex. Limiar é mais rápido que "
+        "Ritmo), nunca dentro do plano da semana em si. Em `prazo_estimado`, seja "
+        "específico e explicativo sobre QUANDO -- não \"no futuro\" ou \"quando estiver "
+        "pronto\": diga um critério concreto (ex. \"depois de 2 semanas seguidas de "
+        "Limiar sem dor\") ou uma janela de tempo estimada (ex. \"provavelmente em "
+        "3-4 semanas, no ritmo de evolução atual\"), baseado no protocolo de retomada "
+        "pós-canelite (progressão só após sessões consecutivas sem dor) e no "
+        "histórico real de progressão do corredor. Feche com uma frase em "
+        "`logica_geral` resumindo a lógica geral da semana.",
     ]
     return "\n".join(partes)
 
@@ -355,12 +399,10 @@ def _linhas_plano(plano: PlanoSemanal, dias: list[date]) -> list[tuple]:
     # ("sábado" minúsculo em vez de "Sábado"); nome do dia é dado
     # determinístico, não precisa confiar na IA pra isso.
     #
-    # Linhas de estimativas_futuras/Resumo não têm um dia específico, mas
-    # levam a data da segunda-feira da semana (dias[0]) na coluna `data` --
-    # assim toda linha de uma mesma semana compartilha um valor filtrável
-    # em comum, útil pra agrupar/filtrar por semana depois.
-    semana_ref = str(dias[0])
-    linhas = [
+    # Só linhas de dia (1 dia = 1 linha, 7 por semana) -- estimativas_futuras
+    # e logica_geral não têm dia específico e "não se encaixam" numa tabela
+    # de histórico por dia; vão só pro e-mail (ver enviar_email_resumo).
+    return [
         (
             nome_dia,
             str(data),
@@ -373,10 +415,6 @@ def _linhas_plano(plano: PlanoSemanal, dias: list[date]) -> list[tuple]:
         )
         for nome_dia, treino, data in zip(DIAS_SEMANA_PT, plano.dias, dias)
     ]
-    for est in plano.estimativas_futuras:
-        linhas.append(("", semana_ref, f"{est.tipo_treino} (estimativa futura)", None, None, est.pace_alvo, est.fc_alvo, est.nota))
-    linhas.append(("Resumo", semana_ref, "", None, None, None, None, plano.logica_geral))
-    return linhas
 
 
 def escrever_plano(spreadsheet, plano: PlanoSemanal, dias: list[date]) -> int:
@@ -394,21 +432,56 @@ def escrever_plano(spreadsheet, plano: PlanoSemanal, dias: list[date]) -> int:
     return len(linhas)
 
 
-def _imprimir_plano(plano: PlanoSemanal, dias: list[date]) -> None:
+def _texto_plano(plano: PlanoSemanal, dias: list[date]) -> str:
+    """Plano completo em texto -- dia a dia + estimativas futuras + lógica
+    geral. Compartilhado entre o print do terminal e o corpo do e-mail
+    (enviar_email_resumo), pra não duplicar a formatação em dois lugares."""
+    linhas = []
     for nome_dia, treino, data in zip(DIAS_SEMANA_PT, plano.dias, dias):
         if treino.descanso:
-            print(f"{nome_dia} ({data}): Descanso -- {treino.motivo}")
+            linhas.append(f"{nome_dia} ({data}): Descanso -- {treino.motivo}")
             continue
         alvo = f"{treino.distancia_km}km" if treino.distancia_km else f"{treino.duracao_min}min"
-        print(
+        linhas.append(
             f"{nome_dia} ({data}): {treino.tipo_treino} -- {alvo}, "
             f"pace {treino.pace_alvo}, FC {treino.fc_alvo} -- {treino.motivo}"
         )
     if plano.estimativas_futuras:
-        print("\nEstimativas pra tipos ainda não tentados:")
+        linhas.append("")
+        linhas.append("Estimativas pra tipos ainda não tentados:")
         for est in plano.estimativas_futuras:
-            print(f"  {est.tipo_treino}: pace {est.pace_alvo}, FC {est.fc_alvo} -- {est.nota}")
-    print(f"\nLógica da semana: {plano.logica_geral}")
+            linhas.append(f"  {est.tipo_treino}: pace {est.pace_alvo}, FC {est.fc_alvo}")
+            linhas.append(f"    Prazo estimado: {est.prazo_estimado}")
+            linhas.append(f"    {est.nota}")
+    linhas.append("")
+    linhas.append(f"Lógica da semana: {plano.logica_geral}")
+    return "\n".join(linhas)
+
+
+def _imprimir_plano(plano: PlanoSemanal, dias: list[date]) -> None:
+    print(_texto_plano(plano, dias))
+
+
+def enviar_email_resumo(plano: PlanoSemanal, dias: list[date]) -> None:
+    """Plano completo (dia a dia + estimativas + lógica geral) por e-mail --
+    esse conteúdo "não se encaixa" na aba "Plano da Semana" (ver
+    _linhas_plano, que só guarda 1 linha por dia como histórico), então vai
+    só pro e-mail e pro print do terminal. Gmail SMTP com senha de app --
+    zero dependência nova, só smtplib da biblioteca padrão."""
+    load_dotenv(ROOT / ".env")
+    remetente = os.environ["EMAIL_REMETENTE"]
+    senha_app = os.environ["EMAIL_SENHA_APP"]
+    destinatario = os.environ.get("EMAIL_DESTINATARIO") or remetente
+
+    msg = EmailMessage()
+    msg["Subject"] = f"Plano de treino -- semana de {dias[0].strftime('%d/%m')} a {dias[-1].strftime('%d/%m')}"
+    msg["From"] = remetente
+    msg["To"] = destinatario
+    msg.set_content(_texto_plano(plano, dias))
+
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+        smtp.login(remetente, senha_app)
+        smtp.send_message(msg)
 
 
 if __name__ == "__main__":
@@ -432,22 +505,28 @@ if __name__ == "__main__":
     if instrucoes:
         print(f"[guardrail(s) ativado(s) -- ACWR atual: {acwr_atual}, dor recente: {dor_recente}]\n")
 
+    spreadsheet = conectar_planilha()
+    observacoes = _observacoes_recentes(spreadsheet)
+
     dias = _proxima_semana()
     prompt = _construir_prompt(
         _formatar_tabela(colunas_ativ, linhas_ativ),
         _formatar_tabela(colunas_resumo, linhas_resumo),
         _faixas_por_tipo(colunas_ativ, linhas_ativ),
+        observacoes,
         instrucoes,
         dias,
     )
     plano = _plano_semanal(gerar_analise(prompt))
     _imprimir_plano(plano, dias)
 
-    spreadsheet = conectar_planilha()
     n = escrever_plano(spreadsheet, plano, dias)
     if n:
         print(f"\n[{n} linha(s) escrita(s) na aba '{ABA_PLANO}']")
     else:
         print(f"\n[plano da semana de {dias[0]} já estava na aba '{ABA_PLANO}', não duplicado]")
+
+    enviar_email_resumo(plano, dias)
+    print("[e-mail com o plano da semana enviado]")
 
     con.close()
