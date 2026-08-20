@@ -548,7 +548,16 @@ LLM) -- usa o vocabulário fechado de `tipo_treino` (seção 6.1) tanto pro
 histórico quanto pra recomendação. Escrito na aba "Plano da Semana"
 (`escrever_plano`) em modo **append-only**, idempotente por data da
 segunda-feira -- cada semana é um registro histórico que se acumula, não
-um snapshot pra sobrescrever (diferente do dashboard da Fase 6).
+um snapshot pra sobrescrever (diferente do dashboard da Fase 6). Só as
+7 linhas de dia vão pra planilha -- `estimativas_futuras` (tipos de
+treino sem histórico ainda, ex. Intervalado/Tiro, cada uma com
+`prazo_estimado` explicando quando/sob que critério tentar) e
+`logica_geral` não têm "1 dia" pra ocupar numa tabela histórica, então
+vão só pro terminal e pro **e-mail semanal** (`enviar_email_resumo`,
+Gmail SMTP via `smtplib` da biblioteca padrão -- zero dependência nova).
+Prompt também lê a aba "Observações" (`_observacoes_recentes`) -- texto
+livre por semana, 100% preenchido pelo usuário, nunca escrito pelo
+script, mesma janela de 4 semanas dos outros dados.
 
 Dois guardrails determinísticos em Python, não uma aposta em o modelo
 perceber sozinho: `_instrucao_guardrail_acwr` (carga semanal agregada,
@@ -565,6 +574,7 @@ sucessivas com os mesmos dados de entrada.
 - [x] Chave da API vem de variável de ambiente (`GEMINI_API_KEY`), nunca hardcoded.
 - [x] Chamada real ao Gemini testada ponta a ponta -- validada múltiplas vezes com dado real, incluindo os dois guardrails disparando juntos.
 - [x] Escrita na planilha é idempotente (rodar 2x na mesma semana não duplica linha) -- testado.
+- [x] E-mail semanal (plano completo + estimativas futuras + lógica geral) enviado e recebido -- confirmado pelo usuário em teste real.
 
 ### Fase 8 — Orquestração (GitHub Actions)
 **Requisitos:** dois workflows, sem Docker (`actions/setup-python`,
@@ -579,7 +589,9 @@ vez, só aí o e-mail padrão do GitHub de workflow agendado que falhou
 dispara. Secrets: `GARMIN_EMAIL`, `GARMIN_PASSWORD` (fallback), `GARMIN_TOKEN`
 (token de sessão já autenticado -- ver seção 11 pra por que isso funciona
 sem senha/MFA a cada run), `DATABASE_URL`, `GOOGLE_SHEET_ID`,
-`GOOGLE_SHEETS_CREDENTIALS_JSON`, `GEMINI_API_KEY`, `GEMINI_MODEL`.
+`GOOGLE_SHEETS_CREDENTIALS_JSON`, `GEMINI_API_KEY`, `GEMINI_MODEL`,
+`EMAIL_REMETENTE`, `EMAIL_SENHA_APP` (senha de app do Gmail),
+`EMAIL_DESTINATARIO` (opcional).
 **Critérios de aceite:**
 - [x] Workflows escritos e validados sintaticamente (`yaml.safe_load` sem erro, jobs corretos).
 - [x] `conectar()` (`extract/garmin.py`) falha rápido com mensagem clara em CI sem senha disponível, em vez de travar esperando `input()`/`getpass()` que nunca chega (runner não tem terminal).
@@ -763,3 +775,42 @@ Decisões da sessão de 2026-08-17 (Fase 8), para referência futura:
   dos scripts Python -- mantém os scripts focados só na lógica de negócio,
   e a política de quantas tentativas/quanto esperar fica declarativa no
   YAML, fácil de ajustar sem tocar em código.
+- **`reusable workflow` (`workflow_call`) em vez de duplicar os passos de
+  sync**: pedido do usuário depois de rodar `analise_semanal.yml`
+  manualmente pela primeira vez e notar que os 4 passos de carga de dado
+  apareciam idênticos nos dois workflows. Limitação aceita conscientemente:
+  cada job do Actions roda numa VM isolada, sem filesystem compartilhado --
+  o job "analisar" ainda repete checkout/setup-python/restaurar token e
+  credencial (~15 linhas estáveis), só a lógica de negócio (carregar
+  atividades/recuperação/dor) deixou de estar duplicada. Cache de pip
+  (`actions/setup-python` `cache: pip`) adicionado no mesmo momento pra
+  acelerar o setup sem reabrir a decisão Docker-vs-setup-python.
+- **Estimativas futuras e resumo saem da planilha, vão pro e-mail**: as
+  linhas de `estimativas_futuras`/`logica_geral` (sem dia da semana
+  específico) não se encaixavam numa tabela pensada como histórico
+  diário (1 linha = 1 dia) -- ficavam órfãs, sem `data`/`dia_semana`
+  preenchido. Em vez de forçar essas informações numa estrutura tabular
+  que não serve pra elas, viraram conteúdo do e-mail semanal (que já
+  precisava existir por outro motivo -- ver item abaixo) e continuam no
+  print do terminal; a planilha "Plano da Semana" ficou estritamente
+  tabular, 7 linhas por semana, sem exceção.
+- **`prazo_estimado` explícito em `estimativas_futuras`**: a versão
+  original só dizia "pace X, FC Y" pra tipos de treino ainda não
+  tentados, sem dizer quando o corredor teria uma base pra tentar --
+  vago demais pra ser acionável. Prompt passou a exigir um critério
+  concreto (ex. "depois de 3 semanas seguidas de Limiar sem dor") ou
+  uma janela de tempo, ancorado no mesmo protocolo de retomada pós-MTSS
+  que já embasa o guardrail de dor (seção 6.1).
+- **E-mail semanal via Gmail SMTP (`smtplib`, biblioteca padrão)**: opção
+  escolhida sobre um serviço terceiro (Resend/SendGrid) por não exigir
+  cadastro em mais um serviço nem dependência nova -- o usuário já tem
+  conta Gmail (a mesma usada em `GARMIN_EMAIL`) e só precisou gerar uma
+  senha de app. Testado ponta a ponta: e-mail chegou, conteúdo (plano +
+  estimativas + lógica geral) confirmado pelo usuário.
+- **Aba "Observações" (texto livre, só leitura pelo script)**: pedido do
+  usuário pra capturar contexto que os dados objetivos não capturam
+  (viagem, imprevisto, sensação subjetiva da semana). Mesmo padrão de
+  "input manual, script nunca escreve" da aba "Dor" (Fase 6), mas sem a
+  etapa de export -- não há nada pra pré-popular, é uma nota livre por
+  semana. Lida com a mesma janela `JANELA_SEMANAS` dos outros dados, pra
+  manter consistência de "o que a IA vê" através do prompt inteiro.

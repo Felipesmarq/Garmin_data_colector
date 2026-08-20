@@ -111,18 +111,37 @@ não acumula histórico duplicado, sempre reflete o estado atual do banco.
 ### Fase 7 — análise semanal com IA (`analyze/analisar_com_ia.py`)
 
 Gera o plano de treino da próxima semana via Gemini a partir de
-`vw_sessoes_ia` + `vw_resumo_semanal`, com dois guardrails determinísticos
-(ACWR e dor recente) e a regra 80/20 injetados no prompt — ver
-`CASE_DO_PROJETO_1.md` seção 6.1. Precisa de `GEMINI_API_KEY` (gere em
-[aistudio.google.com/apikey](https://aistudio.google.com/apikey)) no `.env`.
+`vw_sessoes_ia` + `vw_resumo_semanal` + a aba "Observações" (texto livre,
+ver abaixo), com dois guardrails determinísticos (ACWR e dor recente) e a
+regra 80/20 injetados no prompt — ver `CASE_DO_PROJETO_1.md` seção 6.1.
+Precisa de `GEMINI_API_KEY` (gere em
+[aistudio.google.com/apikey](https://aistudio.google.com/apikey)) e das
+variáveis de e-mail (`EMAIL_REMETENTE`, `EMAIL_SENHA_APP` — senha de app
+do Gmail, gere em
+[myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords),
+exige verificação em 2 etapas ativada) no `.env`.
 
 ```bash
 docker compose run --rm garmin python -m src.analyze.analisar_com_ia
 ```
 
-Imprime o plano no terminal e escreve na aba "Plano da Semana" da mesma
+Imprime o plano no terminal, escreve na aba "Plano da Semana" da mesma
 planilha do Fase 6 -- **append-only**: cada semana gerada é um registro
-novo (idempotente por data da segunda-feira), não sobrescreve o histórico.
+novo (idempotente por data da segunda-feira, 1 linha por dia, não
+sobrescreve o histórico) -- e manda o plano completo por e-mail
+(`EMAIL_DESTINATARIO`, opcional -- por padrão manda pro próprio
+`EMAIL_REMETENTE`).
+
+Estimativas pra tipos de treino ainda não tentados (ex. Intervalado, Tiro)
+e a frase-resumo da semana **não vão pra planilha** (não são "1 linha por
+dia", não fazem sentido no histórico tabular) -- ficam só no terminal e
+no e-mail.
+
+**Aba "Observações"**: texto livre, 100% preenchido por você (o script só
+lê, nunca escreve) -- colunas `semana_inicio` e `observacao`. Contexto que
+os números não capturam (viagem, imprevisto, como a semana realmente foi)
+entra no prompt da próxima geração, mesma janela de 4 semanas dos outros
+dados.
 
 ### Fase 8 — automação (GitHub Actions)
 
@@ -153,9 +172,14 @@ gh secret set DATABASE_URL --body "$(grep '^DATABASE_URL=' .env | cut -d= -f2-)"
 gh secret set GOOGLE_SHEET_ID --body "$(grep '^GOOGLE_SHEET_ID=' .env | cut -d= -f2-)"
 gh secret set GEMINI_API_KEY --body "$(grep '^GEMINI_API_KEY=' .env | cut -d= -f2-)"
 gh secret set GEMINI_MODEL --body "$(grep '^GEMINI_MODEL=' .env | cut -d= -f2- | tr -d '\"')"
+gh secret set EMAIL_REMETENTE --body "$(grep '^EMAIL_REMETENTE=' .env | cut -d= -f2-)"
+gh secret set EMAIL_SENHA_APP --body "$(grep '^EMAIL_SENHA_APP=' .env | cut -d= -f2-)"
 gh secret set GARMIN_TOKEN < .garmin_tokens/garmin_tokens.json
 gh secret set GOOGLE_SHEETS_CREDENTIALS_JSON < .google_sheets_credentials.json
 ```
+
+`EMAIL_DESTINATARIO` é opcional (`gh secret set EMAIL_DESTINATARIO --body "..."`)
+-- sem ele, o plano é enviado pro próprio `EMAIL_REMETENTE`.
 
 `GARMIN_TOKEN` é o conteúdo do token de sessão já autenticado localmente
 (dura ~1 ano, se renova sozinho sem senha/MFA -- ver seção 6.1 do case).
