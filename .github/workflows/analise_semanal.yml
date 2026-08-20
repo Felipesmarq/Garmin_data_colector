@@ -36,6 +36,9 @@ jobs:
       GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
+      EMAIL_REMETENTE: ${{ secrets.EMAIL_REMETENTE }}
+      EMAIL_SENHA_APP: ${{ secrets.EMAIL_SENHA_APP }}
+      EMAIL_DESTINATARIO: ${{ secrets.EMAIL_DESTINATARIO }}
     steps:
       # Job novo, VM nova -- reusable workflow não compartilha filesystem
       # entre jobs, então o ambiente (checkout, Python, token, credencial)
