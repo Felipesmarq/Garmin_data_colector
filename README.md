@@ -3,8 +3,8 @@
 Pipeline pessoal que coleta dados do Garmin Forerunner 165 e vai gerar,
 toda semana, recomendações de treino via IA que marquem evolução — com
 cuidado pra não repetir o padrão de sobrecarga que já causou canelite uma
-vez. Contexto completo, arquitetura e roadmap estão em
-[`CASE_DO_PROJETO_1.md`](CASE_DO_PROJETO_1.md).
+vez. Documentação completa (contexto, arquitetura, roadmap e entendimento
+do negócio) está em [`docs/`](docs/index.md).
 
 Tudo roda em Docker — não precisa instalar Python nem nenhuma
 dependência na sua máquina.
@@ -71,7 +71,7 @@ vezes quiser.
 ### Fase 6 — planilha (Google Sheets): dor + dashboard de desempenho
 
 Substitui a ideia original de Excel local (inviável de sincronizar sem
-passo manual de commit — seção 9 do [`CASE_DO_PROJETO_1.md`](CASE_DO_PROJETO_1.md))
+passo manual de commit — seção 9 do [`docs/CASE_DO_PROJETO_1.md`](docs/CASE_DO_PROJETO_1.md))
 por Google Sheets, acessível do celular. Três abas na mesma planilha:
 **Dor** (input manual, `load_dor.py`), **Atividades** e **Resumo Semanal**
 (dashboard somente-leitura, `planilha_desempenho.py`).
@@ -113,7 +113,7 @@ não acumula histórico duplicado, sempre reflete o estado atual do banco.
 Gera o plano de treino da próxima semana via Gemini a partir de
 `vw_sessoes_ia` + `vw_resumo_semanal` + a aba "Observações" (texto livre,
 ver abaixo), com dois guardrails determinísticos (ACWR e dor recente) e a
-regra 80/20 injetados no prompt — ver `CASE_DO_PROJETO_1.md` seção 6.1.
+regra 80/20 injetados no prompt — ver `docs/CASE_DO_PROJETO_1.md` seção 6.1.
 Precisa de `GEMINI_API_KEY` (gere em
 [aistudio.google.com/apikey](https://aistudio.google.com/apikey)) e das
 variáveis de e-mail (`EMAIL_REMETENTE`, `EMAIL_SENHA_APP` — senha de app
@@ -212,7 +212,11 @@ de novo pra atualizar o `GARMIN_TOKEN`.
 │   └── analyze/analisar_com_ia.py  # plano semanal via Gemini + guardrails, aba "Plano da Semana"
 ├── Dockerfile · docker-compose.yml · .dockerignore  # só pra dev local, não usado em produção
 ├── requirements.txt · .env.example · .gitignore
-└── CASE_DO_PROJETO_1.md        # case completo do projeto
+└── docs/
+    ├── index.md                 # página de documentação, com link pra tudo abaixo
+    ├── CASE_DO_PROJETO_1.md     # case completo do projeto
+    ├── ENTENDIMENTO_DO_NEGOCIO.md   # entendimento do negócio (CRISP-DM)
+    └── ENTENDIMENTO_DO_NEGOCIO.pdf  # mesmo documento, em PDF
 ```
 
 ## Status
@@ -225,7 +229,7 @@ validados sintaticamente, pendente de: você configurar os Secrets
 (comandos acima) e deixar rodar pelo menos 2 semanas sem intervenção
 manual pra fechar o critério de aceite. Falta: Fase 9 (ajuste fino).
 Roadmap completo e critérios de aceite por fase na seção 7 do
-[`CASE_DO_PROJETO_1.md`](CASE_DO_PROJETO_1.md).
+[`docs/CASE_DO_PROJETO_1.md`](docs/CASE_DO_PROJETO_1.md).
 
 ## Solução de problemas
 
