@@ -1,6 +1,6 @@
 name: Análise semanal
 
-# Roda domingo à noite (Fase 8 -- ver CASE_DO_PROJETO_1.md seção 7). O job
+# Roda domingo à noite (Fase 8 -- ver docs/CASE_DO_PROJETO_1.md seção 7). O job
 # "sync" chama sync_atividades.yml como reusable workflow (workflow_call) em
 # vez de duplicar os mesmos 4 passos de carga de dado -- isso também resolve
 # o problema de a análise pegar dado desatualizado por coincidência de

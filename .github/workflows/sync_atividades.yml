@@ -1,6 +1,6 @@
 name: Sync atividades
 
-# Roda 1x/dia (Fase 8 -- ver CASE_DO_PROJETO_1.md seção 7). Horário em UTC:
+# Roda 1x/dia (Fase 8 -- ver docs/CASE_DO_PROJETO_1.md seção 7). Horário em UTC:
 # GitHub Actions cron não entende fuso -- 21h BRT = 00h UTC do dia seguinte.
 on:
   schedule:
