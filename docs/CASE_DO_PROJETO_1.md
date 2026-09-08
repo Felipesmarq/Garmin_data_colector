@@ -1013,3 +1013,46 @@ o Neon e a planilha reais, não só por inspeção de código:
   `data == ontem`) não foi exercitado em produção real nesta sessão,
   porque as datas disponíveis pra teste eram todas passadas há muito
   tempo ou futuras -- confirmado só por leitura do código.
+
+## Bug real de produção: `date.today()` no fuso errado (2026-09-08)
+
+**Sintoma:** a execução agendada de `analise_semanal.yml` no domingo
+2026-09-06 gerou o plano pra semana de **14/09**, não de **07/09** como
+deveria.
+
+**Causa raiz, confirmada pelo log real do GitHub Actions (run
+`34070585809`):** a execução, agendada pra 23h UTC (20h BRT) de domingo,
+efetivamente rodou às **2026-09-07T00:42 UTC** -- 1h42 de atraso, comum
+em workflows agendados do GitHub Actions. Esse atraso foi suficiente pra
+cruzar a virada de dia em UTC: `date.today()`, dentro do runner (que roda
+em UTC, não BRT), já devolvia **segunda-feira** (07/09) mesmo sendo ainda
+domingo à noite (21h42) no Brasil. `_proxima_semana()`, pra uma
+segunda-feira, calcula "próxima segunda-feira" como `hoje + 7 dias` --
+pulando a semana inteira que deveria ter sido gerada e indo direto pra
+14/09.
+
+**Por que não é só a Fase 7:** o mesmo padrão (`date.today()` sem fuso
+explícito) apareceu em mais lugares do pipeline, com o mesmo risco:
+`_observacoes_recentes` e a janela de `vw_sessoes_ia` (Fase 7, impacto
+baixo -- só desloca a borda de uma janela de N dias em ±1), e mais grave,
+`resolver_dias_planejados`/`ontem` (Fase 9, recém-implementada, mesmo
+risco de pular a semana/dia errado) e `load_recuperacao.py` (Fase 3) --
+esse último especialmente exposto, porque o sync diário roda às 21h BRT
+= **exatamente 00h UTC**, ou seja, a virada de dia em UTC acontece bem no
+horário agendado, não numa borda distante.
+
+**Correção:** novo módulo `src/tempo.py`, com `hoje_brt()` -- usa
+`zoneinfo.ZoneInfo("America/Sao_Paulo")` (pacote `tzdata` adicionado ao
+`requirements.txt` como rede de segurança, caso a imagem não tenha o
+banco de fusos do sistema) em vez de `date.today()`/`CURRENT_DATE` do
+Postgres (que reflete o fuso do servidor, também UTC). Todo lugar do
+pipeline que precisa saber "que dia é hoje" foi trocado pra usar
+`hoje_brt()`: `_proxima_semana`, `_observacoes_recentes` e a janela de
+`vw_sessoes_ia` (`analisar_com_ia.py`), `resolver_dias_planejados` e
+`ontem` (`planilha_desempenho.py`), `atividades_novas` (`extract/
+garmin.py`) e o loop de backfill de `load_recuperacao.py`.
+
+**Validado** reproduzindo o timestamp exato da falha real (2026-09-07T00:42
+UTC): convertido pra BRT dá 2026-09-06 (domingo), e a partir daí
+`_proxima_semana()` calcula corretamente 07/09 -- confirma que a correção
+teria evitado o bug real observado.
