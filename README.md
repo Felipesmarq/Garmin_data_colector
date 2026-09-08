@@ -227,7 +227,9 @@ e escrito na planilha ponta a ponta, guardrails de ACWR/dor confirmados
 disparando). Fase 8 (GitHub Actions) com os workflows escritos e
 validados sintaticamente, pendente de: você configurar os Secrets
 (comandos acima) e deixar rodar pelo menos 2 semanas sem intervenção
-manual pra fechar o critério de aceite. Falta: Fase 9 (ajuste fino).
+manual pra fechar o critério de aceite. Fases 9 a 11 (verificação de
+aderência, filtro de tokens, revisão de coerência) desenhadas em sessão
+de grilling, ainda não implementadas. Falta: Fase 12 (ajuste fino).
 Roadmap completo e critérios de aceite por fase na seção 7 do
 [`docs/CASE_DO_PROJETO_1.md`](docs/CASE_DO_PROJETO_1.md).
 
