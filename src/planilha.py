@@ -103,6 +103,15 @@ def inserir_linhas(aba: gspread.Worksheet, linhas: list[list]) -> None:
         aba.append_rows(linhas, value_input_option="USER_ENTERED")
 
 
+def inserir_linhas_no_topo(aba: gspread.Worksheet, linhas: list[list]) -> None:
+    """Insere linhas logo abaixo do cabeçalho (linha 2), empurrando o resto
+    pra baixo -- sem tocar no conteúdo das linhas já existentes. Usado
+    quando a aba lista o mais recente primeiro (`ORDER BY ... DESC`): passe
+    `linhas` já nessa ordem, e o bloco inserido preserva a ordem entre si."""
+    if linhas:
+        aba.insert_rows(linhas, row=2, value_input_option="USER_ENTERED")
+
+
 def sobrescrever(aba: gspread.Worksheet, cabecalho: list[str], linhas: list[tuple]) -> None:
     """Limpa a aba inteira e reescreve cabeçalho + linhas.
 
