@@ -1,10 +1,16 @@
 """Fase 6 (extensão) — dashboard de desempenho na planilha, abas "Atividades"
-e "Resumo Semanal" -- somente leitura, sem upsert em nenhuma tabela.
+e "Resumo Semanal" -- somente leitura, sem upsert em nenhuma tabela do
+Postgres (a planilha em si não alimenta o banco de volta).
 
-Cada execução sobrescreve a aba inteira com o snapshot atual de
-`vw_sessoes`/`vw_resumo_semanal` (não é incremental) -- evita lógica de
-diff numa aba que existe só pra leitura, e garante que a planilha nunca
-fica com linha "fantasma" de uma atividade apagada/corrigida no banco.
+"Resumo Semanal" continua sobrescrita inteira a cada execução -- poucas
+linhas (1 por semana ISO), sem custo real de reescrever, e sem "linha
+existente" que valha a pena preservar. "Atividades" faz upsert por
+`activity_id` (Fase 9): só insere atividade nova, nunca reescreve a que já
+está na planilha -- sobrescrever tudo a cada execução ficava mais caro a
+cada atividade nova acumulada. Efeito colateral aceito: uma atividade
+corrigida ou apagada direto no Postgres não se reflete mais sozinha na
+planilha (caso raro, sem lógica de reconciliação -- ver CASE_DO_PROJETO_1
+seção 11).
 
 As views guardam `double precision`/`numeric` crus (ex. distância em km
 como `3.00331005859375`), sem serventia pra leitura humana -- os
@@ -17,12 +23,12 @@ from functools import partial
 import psycopg
 
 from src.db import conectar
-from src.planilha import conectar as conectar_planilha, obter_aba, sobrescrever
+from src.planilha import conectar as conectar_planilha, inserir_linhas_no_topo, obter_aba, sobrescrever
 
 ABA_ATIVIDADES = "Atividades"
 COR_ATIVIDADES = (0.16, 0.42, 0.75)  # azul
 COLUNAS_ATIVIDADES = [
-    "data", "nome", "tipo", "distancia_km", "duracao_min", "pace_min_km",
+    "activity_id", "data", "nome", "tipo", "distancia_km", "duracao_min", "pace_min_km",
     "velocidade_media_mps", "fc_media", "fc_maxima", "cadencia_media",
     "efeito_treino_aerobico", "classificacao_atividade",
 ]
@@ -137,12 +143,33 @@ def _formatar_linhas(cabecalho: list[str], linhas: list[tuple]) -> list[tuple]:
     ]
 
 
+def _activity_ids_na_planilha(aba) -> set[int]:
+    valores = aba.col_values(1)[1:]  # pula cabeçalho (coluna A = activity_id)
+    return {int(v) for v in valores if v}
+
+
 def escrever_atividades(con: psycopg.Connection, spreadsheet) -> int:
+    """Upsert por `activity_id`: só insere atividade que ainda não está na
+    planilha, no topo (mais recente primeiro) -- nunca reescreve a aba
+    inteira (ver módulo)."""
     aba = obter_aba(spreadsheet, ABA_ATIVIDADES, CABECALHO_ATIVIDADES, cor=COR_ATIVIDADES)
+    if aba.row_values(1) != CABECALHO_ATIVIDADES:
+        # aba criada antes de existir a coluna activity_id -- reconstrói o
+        # cabeçalho uma vez; com a aba "vazia" a partir daqui, o upsert
+        # abaixo já cuida de reinserir todo o histórico, sem código extra.
+        aba.clear()
+        aba.append_row(CABECALHO_ATIVIDADES)
+
+    ja_na_planilha = _activity_ids_na_planilha(aba)
+    filtro = f"WHERE activity_id NOT IN ({','.join(map(str, ja_na_planilha))})" if ja_na_planilha else ""
     linhas = con.execute(
-        f"SELECT {', '.join(COLUNAS_ATIVIDADES)} FROM vw_sessoes ORDER BY data DESC"
+        f"SELECT {', '.join(COLUNAS_ATIVIDADES)} FROM vw_sessoes {filtro} ORDER BY data DESC"
     ).fetchall()
-    sobrescrever(aba, CABECALHO_ATIVIDADES, _formatar_linhas(COLUNAS_ATIVIDADES, linhas))
+    linhas_formatadas = [
+        ["" if v is None else str(v) for v in linha]
+        for linha in _formatar_linhas(COLUNAS_ATIVIDADES, linhas)
+    ]
+    inserir_linhas_no_topo(aba, linhas_formatadas)
     return len(linhas)
 
 
