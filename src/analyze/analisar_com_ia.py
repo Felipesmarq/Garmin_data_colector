@@ -23,10 +23,8 @@ fácil de ajustar/testar, não uma verdade definitiva.
 """
 
 import os
-import smtplib
 from datetime import date, timedelta
 from decimal import Decimal
-from email.message import EmailMessage
 from pathlib import Path
 
 import gspread
@@ -37,7 +35,15 @@ from google.genai import types
 from pydantic import BaseModel
 
 from src.db import conectar
-from src.planilha import conectar as conectar_planilha, inserir_linhas, obter_aba
+from src.email_util import enviar_email
+from src.load.planilha_desempenho import (
+    ABA_ATIVIDADES,
+    CABECALHO_ATIVIDADES,
+    COLUNAS_REAIS,
+    COR_ATIVIDADES,
+    STATUS_PLANEJADO,
+)
+from src.planilha import conectar as conectar_planilha, inserir_linhas, inserir_linhas_no_topo, obter_aba
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -432,6 +438,61 @@ def escrever_plano(spreadsheet, plano: PlanoSemanal, dias: list[date]) -> int:
     return len(linhas)
 
 
+def _numero_planilha(v, casas: int) -> str:
+    """Mesma convenção de vírgula decimal de planilha_desempenho._numero --
+    sem isso, o Sheets confunde "4.57" com separador de milhar (locale
+    pt-BR da planilha) e vira "4.570.000..." (ver histórico do projeto)."""
+    if v is None:
+        return ""
+    return f"{float(v):.{casas}f}".rstrip("0").rstrip(".").replace(".", ",")
+
+
+def escrever_dias_planejados(spreadsheet, plano: PlanoSemanal, dias: list[date]) -> int:
+    """Fase 9 -- grava um placeholder (status PLANEJADO) por dia de treino
+    (não descanso) na aba "Atividades", pro job diário resolver depois
+    contra a atividade real (ver planilha_desempenho.resolver_dias_planejados).
+    Upsert por `data`, não por `activity_id` (dia planejado não tem
+    atividade associada ainda) -- idempotente: se qualquer dia dessa semana
+    já tem linha de plano em "Atividades", não insere de novo. Checa
+    qualquer dia da semana, não só a segunda-feira (diferente de
+    escrever_plano) -- segunda pode ser dia de descanso, que nunca ganha
+    linha própria, então checar só ela nunca encontraria a semana já
+    escrita e duplicaria a cada execução."""
+    aba = obter_aba(spreadsheet, ABA_ATIVIDADES, CABECALHO_ATIVIDADES, cor=COR_ATIVIDADES)
+    idx_data = CABECALHO_ATIVIDADES.index("data")
+    idx_status = CABECALHO_ATIVIDADES.index("status")
+    datas_semana = {str(d) for d in dias}
+    ja_planejada = any(
+        len(linha) > idx_status and linha[idx_data] in datas_semana and linha[idx_status]
+        for linha in aba.get_all_values()[1:]
+    )
+    if ja_planejada:
+        return 0
+
+    em_branco_real = [""] * len(COLUNAS_REAIS)
+    idx_data_real = COLUNAS_REAIS.index("data")
+    linhas = []
+    # mais recente primeiro (mesma convenção do resto da aba, ver
+    # escrever_atividades) -- dias já vem em ordem Segunda->Domingo, então
+    # percorre de trás pra frente antes de inserir no topo.
+    for treino, data in reversed(list(zip(plano.dias, dias))):
+        if treino.descanso:
+            continue
+        linha_real = list(em_branco_real)
+        linha_real[idx_data_real] = str(data)
+        linha_plano = [
+            STATUS_PLANEJADO,
+            treino.tipo_treino or "",
+            _numero_planilha(treino.distancia_km, casas=2),
+            _numero_planilha(treino.duracao_min, casas=1),
+            treino.pace_alvo or "",
+            treino.fc_alvo or "",
+        ]
+        linhas.append([str(v) for v in linha_real + linha_plano])
+    inserir_linhas_no_topo(aba, linhas)
+    return len(linhas)
+
+
 def _texto_plano(plano: PlanoSemanal, dias: list[date]) -> str:
     """Plano completo em texto -- dia a dia + estimativas futuras + lógica
     geral. Compartilhado entre o print do terminal e o corpo do e-mail
@@ -466,22 +527,9 @@ def enviar_email_resumo(plano: PlanoSemanal, dias: list[date]) -> None:
     """Plano completo (dia a dia + estimativas + lógica geral) por e-mail --
     esse conteúdo "não se encaixa" na aba "Plano da Semana" (ver
     _linhas_plano, que só guarda 1 linha por dia como histórico), então vai
-    só pro e-mail e pro print do terminal. Gmail SMTP com senha de app --
-    zero dependência nova, só smtplib da biblioteca padrão."""
-    load_dotenv(ROOT / ".env")
-    remetente = os.environ["EMAIL_REMETENTE"]
-    senha_app = os.environ["EMAIL_SENHA_APP"]
-    destinatario = os.environ.get("EMAIL_DESTINATARIO") or remetente
-
-    msg = EmailMessage()
-    msg["Subject"] = f"Plano de treino -- semana de {dias[0].strftime('%d/%m')} a {dias[-1].strftime('%d/%m')}"
-    msg["From"] = remetente
-    msg["To"] = destinatario
-    msg.set_content(_texto_plano(plano, dias))
-
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
-        smtp.login(remetente, senha_app)
-        smtp.send_message(msg)
+    só pro e-mail e pro print do terminal."""
+    assunto = f"Plano de treino -- semana de {dias[0].strftime('%d/%m')} a {dias[-1].strftime('%d/%m')}"
+    enviar_email(assunto, _texto_plano(plano, dias))
 
 
 if __name__ == "__main__":
@@ -525,6 +573,12 @@ if __name__ == "__main__":
         print(f"\n[{n} linha(s) escrita(s) na aba '{ABA_PLANO}']")
     else:
         print(f"\n[plano da semana de {dias[0]} já estava na aba '{ABA_PLANO}', não duplicado]")
+
+    n_plan = escrever_dias_planejados(spreadsheet, plano, dias)
+    if n_plan:
+        print(f"[{n_plan} dia(s) planejado(s) escrito(s) na aba '{ABA_ATIVIDADES}', status {STATUS_PLANEJADO}]")
+    else:
+        print(f"[dias planejados da semana de {dias[0]} já estavam na aba '{ABA_ATIVIDADES}', não duplicados]")
 
     enviar_email_resumo(plano, dias)
     print("[e-mail com o plano da semana enviado]")
