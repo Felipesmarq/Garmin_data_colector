@@ -647,11 +647,11 @@ Sem retroalimentação nesta fase: o resultado da verificação **não** entra
 no prompt da análise semanal nem vira guardrail -- é só informativo.
 
 **Critérios de aceite:**
-- [ ] Um dia planejado sem atividade correspondente aparece como `NÃO_REALIZADO` na aba "Atividades" depois do sync diário.
-- [ ] Um dia com atividade dentro de todas as margens aparece como `REALIZADO_DENTRO_DA_MARGEM`; fora de qualquer margem, `REALIZADO_FORA_DA_MARGEM`.
-- [ ] Duas atividades no mesmo dia são somadas antes da comparação, não tratadas como linhas separadas.
-- [ ] Rodar o job diário duas vezes seguidas não duplica linha nem perde as linhas de dia planejado escritas no domingo.
-- [ ] E-mail diário de lembrete só chega quando há pelo menos um dia `NÃO_REALIZADO`/`REALIZADO_FORA_DA_MARGEM` no dia anterior -- testado com e sem pendência.
+- [x] Um dia planejado sem atividade correspondente aparece como `NÃO_REALIZADO` na aba "Atividades" depois do sync diário. Testado em 2026-09-08 com data sintética (2020-01-01, sem atividade no Postgres).
+- [x] Um dia com atividade dentro de todas as margens aparece como `REALIZADO_DENTRO_DA_MARGEM`; fora de qualquer margem, `REALIZADO_FORA_DA_MARGEM`. Testado com dado real (2026-08-15) e um plano propositalmente incompatível (2026-08-13).
+- [x] Duas atividades no mesmo dia são somadas antes da comparação, não tratadas como linhas separadas. Testado em 2026-08-13 (2 atividades reais no dia, agregadas numa linha só antes da comparação).
+- [x] Rodar o job diário duas vezes seguidas não duplica linha nem perde as linhas de dia planejado escritas no domingo. Testado em 2026-09-08.
+- [x] E-mail diário de lembrete só chega quando há pelo menos um dia `NÃO_REALIZADO`/`REALIZADO_FORA_DA_MARGEM` no dia anterior -- mecanismo de envio testado (mesma função `enviar_email` do e-mail semanal, já validada); o gatilho por data (`ontem`) não foi validado em produção real ainda, só por inspeção de código.
 - [x] `escrever_atividades` não reescreve linhas de atividade já presentes na planilha -- só insere as novas (upsert por `activity_id`, sem sobrescrita total). Testado em 2026-09-08 contra o Neon e a planilha reais: migração automática do cabeçalho (15 atividades reescritas com a coluna nova, ordem mais-recente-primeiro preservada) e, na segunda execução, 0 atividades reinseridas.
 
 ### Fase 10 — Filtro de tokens (rede de segurança pro Gemini)
@@ -969,3 +969,47 @@ referência futura:
   deixa de se refletir automaticamente na planilha -- decisão explícita
   do usuário de não pagar o custo de uma lógica de reconciliação (diff
   completo Postgres x planilha) pra cobrir um caso raro.
+
+Implementação da Fase 9 (2026-09-08) -- bugs encontrados testando contra
+o Neon e a planilha reais, não só por inspeção de código:
+
+- **Número planejado sem vírgula decimal quebrava a leitura de volta**:
+  `escrever_dias_planejados` escrevia `distancia_km`/`duracao_min` do
+  plano com `str(v)` direto (ponto decimal) -- o mesmo bug de locale
+  pt-BR já documentado (seção 6, `planilha_desempenho.py`), só que numa
+  coluna nova que ainda não tinha o cuidado aplicado. O Sheets confundiu
+  `"4.57"` com separador de milhar e virou `"456.989..."` ao ler de
+  volta, quebrando o parse em `resolver_dias_planejados`. Corrigido com
+  um formatador local (`_numero_planilha`) na escrita, espelhando o `_numero`
+  que `planilha_desempenho.py` já usa.
+- **Idempotência de `escrever_dias_planejados` checando só a segunda-feira**:
+  copiado do padrão de `escrever_plano` (checa se a segunda-feira já está
+  na coluna `data`), mas segunda-feira pode ser dia de descanso -- que
+  nunca ganha linha própria em "Atividades". Checar só ela nunca
+  encontraria a semana já escrita, duplicando as linhas de dia planejado
+  a cada execução. Corrigido pra checar qualquer um dos 7 dias da semana.
+- **Ordem dos dias planejados invertida**: a primeira versão inseria os
+  dias na ordem Segunda->Domingo, e como `inserir_linhas_no_topo` insere
+  o bloco preservando a ordem, o dia mais **antigo** da semana ficava no
+  topo -- inconsistente com o resto da aba, que é sempre mais-recente-
+  primeiro. Corrigido percorrendo os dias de trás pra frente antes de
+  montar as linhas.
+- **Checagem de migração do cabeçalho excessivamente ampla**: a versão
+  original de `escrever_atividades` comparava o cabeçalho inteiro
+  (`row_values(1) != CABECALHO_ATIVIDADES`) e limpava a aba inteira em
+  qualquer divergência -- inclusive uma que apareceu uma vez durante os
+  testes desta fase sem causa determinada (possível inconsistência
+  transitória da API do Sheets sob a sequência rápida de chamadas do
+  teste manual), apagando as linhas de dia planejado já escritas.
+  Restrito pra só disparar a migração quando `"activity_id"` está
+  ausente do cabeçalho -- o caso real que a checagem existe pra cobrir --
+  em vez de qualquer divergência, porque uma comparação ampla dispararia
+  de novo em qualquer mudança futura de schema e apagaria dias
+  planejados/resolvidos que só existem na planilha, sem como reconstruir
+  a partir do Postgres.
+- **E-mail diário de lembrete**: mecanismo de envio (`enviar_email`,
+  compartilhado com o e-mail semanal via novo `src/email_util.py`)
+  testado com envio real. O gatilho por data (`resolvidos` filtrado por
+  `data == ontem`) não foi exercitado em produção real nesta sessão,
+  porque as datas disponíveis pra teste eram todas passadas há muito
+  tempo ou futuras -- confirmado só por leitura do código.

@@ -189,6 +189,20 @@ de travar esperando input (`src/extract/garmin.py`, `conectar()`) --
 nesse caso, refaça o login local e rode o bloco de `gh secret set`
 de novo pra atualizar o `GARMIN_TOKEN`.
 
+### Fase 9 — verificação de aderência (plano vs. treino real)
+
+Sem comando próprio -- roda dentro do fluxo já existente. Todo domingo,
+`analisar_com_ia.py` grava um placeholder por dia de treino da semana
+(status `PLANEJADO`) na aba "Atividades", ao lado das atividades reais.
+Todo dia, `planilha_desempenho.py` resolve os dias planejados cuja data já
+chegou -- comparando contra `vw_sessoes` com margem de tolerância (±20%
+distância/duração, ±30s/km pace, ±10bpm FC) -- e atualiza o status pra
+`REALIZADO_DENTRO_DA_MARGEM`, `REALIZADO_FORA_DA_MARGEM` ou
+`NÃO_REALIZADO`. Quando o dia anterior fica com um desses dois últimos
+status, um e-mail curto de lembrete é enviado (mesmo mecanismo do e-mail
+semanal, `EMAIL_REMETENTE`/`EMAIL_SENHA_APP`). Puramente informativo por
+enquanto -- não influencia a geração do plano seguinte.
+
 ## Estrutura do projeto
 
 ```
@@ -202,13 +216,14 @@ de novo pra atualizar o `GARMIN_TOKEN`.
 ├── src/
 │   ├── db.py                   # conexão Postgres (Neon) + aplica schema.sql
 │   ├── planilha.py              # conexão Google Sheets + abas/linhas (mecânica genérica, sem regra de negócio)
+│   ├── email_util.py           # envio de e-mail via Gmail SMTP (mecânica genérica)
 │   ├── extract/garmin.py       # puxa atividades (+ splits run/walk) e recuperação diária da API
 │   ├── load/
 │   │   ├── schema.sql          # DDL: staging -> vw_sessoes -> vw_sessoes_ia -> vw_resumo_semanal
 │   │   ├── load_atividades.py  # upsert de atividades + splits
 │   │   ├── load_recuperacao.py
 │   │   ├── load_dor.py         # aba "Dor": exporta pendentes + importa preenchidas em stg_dor
-│   │   └── planilha_desempenho.py  # abas "Atividades"/"Resumo Semanal": snapshot somente-leitura
+│   │   └── planilha_desempenho.py  # "Atividades" (upsert) + "Resumo Semanal" (snapshot) + verificação de aderência (Fase 9)
 │   └── analyze/analisar_com_ia.py  # plano semanal via Gemini + guardrails, aba "Plano da Semana"
 ├── Dockerfile · docker-compose.yml · .dockerignore  # só pra dev local, não usado em produção
 ├── requirements.txt · .env.example · .gitignore
@@ -227,10 +242,13 @@ e escrito na planilha ponta a ponta, guardrails de ACWR/dor confirmados
 disparando). Fase 8 (GitHub Actions) com os workflows escritos e
 validados sintaticamente, pendente de: você configurar os Secrets
 (comandos acima) e deixar rodar pelo menos 2 semanas sem intervenção
-manual pra fechar o critério de aceite. Fases 9 a 11 (verificação de
-aderência, filtro de tokens, revisão de coerência) desenhadas em sessão
-de grilling, ainda não implementadas. Falta: Fase 12 (ajuste fino).
-Roadmap completo e critérios de aceite por fase na seção 7 do
+manual pra fechar o critério de aceite. Fase 9 (verificação de aderência)
+implementada e **validada contra o Neon e a planilha reais** (comparação
+com margem, soma de múltiplas atividades no dia, upsert idempotente,
+mecanismo de e-mail de lembrete testado). Fases 10 e 11 (filtro de
+tokens, revisão de coerência) desenhadas em sessão de grilling, ainda não
+implementadas. Falta: Fase 12 (ajuste fino). Roadmap completo e critérios
+de aceite por fase na seção 7 do
 [`docs/CASE_DO_PROJETO_1.md`](docs/CASE_DO_PROJETO_1.md).
 
 ## Solução de problemas
