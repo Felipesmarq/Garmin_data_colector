@@ -12,7 +12,7 @@ Uso típico (de outro script):
 
     api = conectar()
     atividades = atividades_novas(api, dias=3)
-    recuperacao = recuperacao_diaria(api, date.today())
+    recuperacao = recuperacao_diaria(api, hoje_brt())
 """
 
 import getpass
@@ -29,6 +29,8 @@ from garminconnect import (
     GarminConnectConnectionError,
     GarminConnectTooManyRequestsError,
 )
+
+from src.tempo import hoje_brt
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 TOKENSTORE = str(ROOT / ".garmin_tokens")
@@ -178,7 +180,7 @@ def atividades_novas(api: Garmin, dias: int = 7, limite: int = 20) -> list[dict]
     responsabilidade do load/load_atividades.py (Fase 3), via
     activity_id (PRIMARY KEY em stg_atividades).
     """
-    corte = date.today() - timedelta(days=dias)
+    corte = hoje_brt() - timedelta(days=dias)
     brutas = api.get_activities(0, limite)
     mapeadas = []
     for bruta in brutas:
@@ -261,5 +263,5 @@ if __name__ == "__main__":
         print(f"  {a['data']} | {a['nome']} | {a['distancia_m']}m | fc_media={a['fc_media']}")
 
     print("\n--- recuperacao_diaria(hoje) ---")
-    r = recuperacao_diaria(api, date.today())
+    r = recuperacao_diaria(api, hoje_brt())
     print(f"  {r}")

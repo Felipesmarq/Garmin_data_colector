@@ -43,15 +43,19 @@ def carregar(con: psycopg.Connection, dias: list[dict]) -> int:
 if __name__ == "__main__":
     # roda dentro do container com:
     #   docker compose run --rm garmin python -m src.load.load_recuperacao
-    from datetime import date, timedelta
+    from datetime import timedelta
 
     from src.extract.garmin import conectar as conectar_garmin
     from src.extract.garmin import recuperacao_diaria
+    from src.tempo import hoje_brt
 
     api = conectar_garmin()
     dias = []
     for i in range(7):
-        dia = date.today() - timedelta(days=i)
+        # hoje_brt(), não date.today() -- esse job roda às 21h BRT = 00h
+        # UTC (virada de dia), então date.today() no runner (UTC) já
+        # devolveria amanhã em BRT em qualquer atraso de agendamento.
+        dia = hoje_brt() - timedelta(days=i)
         r = recuperacao_diaria(api, dia)
         if r:
             dias.append(r)
