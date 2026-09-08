@@ -28,6 +28,7 @@ import psycopg
 from src.db import conectar
 from src.email_util import enviar_email
 from src.planilha import conectar as conectar_planilha, inserir_linhas_no_topo, obter_aba, sobrescrever
+from src.tempo import hoje_brt
 
 ABA_ATIVIDADES = "Atividades"
 COR_ATIVIDADES = (0.16, 0.42, 0.75)  # azul
@@ -299,7 +300,7 @@ def resolver_dias_planejados(con: psycopg.Connection, spreadsheet) -> list[tuple
     o lembrete diário (ver __main__)."""
     aba = obter_aba(spreadsheet, ABA_ATIVIDADES, CABECALHO_ATIVIDADES, cor=COR_ATIVIDADES)
     idx = {c: i for i, c in enumerate(CABECALHO_ATIVIDADES)}
-    hoje = date.today()
+    hoje = hoje_brt()
 
     atualizacoes = []
     resolvidos = []
@@ -375,7 +376,7 @@ if __name__ == "__main__":
         detalhe = ", ".join(f"{d.strftime('%d/%m')}={s}" for d, s in resolvidos)
         print(f"{len(resolvidos)} dia(s) planejado(s) resolvido(s): {detalhe}")
 
-    ontem = date.today() - timedelta(days=1)
+    ontem = hoje_brt() - timedelta(days=1)
     pendencias_ontem = [
         (d, s) for d, s in resolvidos
         if d == ontem and s in (STATUS_NAO_REALIZADO, STATUS_REALIZADO_FORA_DA_MARGEM)
