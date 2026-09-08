@@ -510,6 +510,8 @@ responsabilidade:
   somente leitura, snapshot de `vw_sessoes`/`vw_resumo_semanal`
   (pace, velocidade, km, ACWR) sobrescrito a cada execução, sem upsert em
   nenhuma tabela — pra acompanhar desempenho/evolução sem abrir o Neon.
+  Nota: o mecanismo de escrita de "Atividades" é revisado na Fase 9
+  (seção 7) — deixa de ser sobrescrita total e passa a ser upsert.
 
 A mecânica de planilha (conectar, abrir/criar aba, inserir/sobrescrever
 linhas) foi extraída pra `src/planilha.py`, compartilhada pelos dois
@@ -527,7 +529,10 @@ Autenticação via service account do Google Cloud
 - [x] Rodar `load_dor.py` duas vezes seguidas não duplica linha nem na
   planilha nem em `stg_dor` — testado em 2026-08-14.
 - [x] `planilha_desempenho.py` sobrescreve as abas em vez de acumular —
-  testado rodando duas vezes seguidas, mesma contagem de linhas.
+  testado rodando duas vezes seguidas, mesma contagem de linhas. Válido
+  para "Resumo Semanal"; "Atividades" passa a fazer upsert a partir da
+  Fase 9 (ver seção 7) — sobrescrita total ficou cara demais conforme o
+  histórico cresce.
 - [ ] Formatação (cabeçalho fixo/congelado) e validação de dados
   (dropdown pra `dor` 0-5 e pra `localizacao`/`superficie`/`tenis`) —
   ainda não implementado, avaliar se via código (`src/planilha.py`) ou
@@ -599,7 +604,101 @@ sem senha/MFA a cada run), `DATABASE_URL`, `GOOGLE_SHEET_ID`,
 - [ ] Nenhum dado sensível (FC, sono, localização de dor) aparece em log do Actions -- por design (Secrets são mascarados automaticamente pelo GitHub, nenhum script imprime valor de Secret), falta confirmar num run real.
 - [x] Nenhum commit automático de dado é gerado pelo workflow -- nenhum step chama `git commit`/`git push`, só leitura/escrita em Neon e Google Sheets.
 
-### Fase 9 — Ajuste fino
+### Fase 9 — Verificação de aderência (plano vs. treino real)
+**Requisitos:** comparação determinística entre "Plano da Semana" (o que
+foi planejado) e `vw_sessoes` (o que foi realizado), por dia da semana
+corrente -- sem chamada ao Gemini, mesmo princípio dos guardrails de ACWR
+e dor (o que é mensurável não depende do modelo perceber sozinho, ver
+seção 11). Regra de correspondência: dia sem atividade real vira
+`NÃO_REALIZADO`; mais de uma atividade no mesmo dia soma distância e
+duração antes de comparar. Regra de aprovação: `tipo_treino` tem que
+bater exatamente, e distância/duração/pace/FC precisam estar todas dentro
+da margem (±20% distância/duração, ±30s/km pace, ±10bpm FC) para contar
+como `REALIZADO_DENTRO_DA_MARGEM` -- fora de qualquer uma delas vira
+`REALIZADO_FORA_DA_MARGEM`. Margens são um ponto de partida, ajustável no
+código depois de ver algumas semanas de dado real.
+
+Escrita: `escrever_atividades` deixa de sobrescrever a aba inteira a cada
+execução (custo que só cresce conforme o histórico acumula) e passa a
+fazer **upsert por `activity_id`** -- atividade já presente na planilha
+não é tocada de novo, só as novas são inseridas. Isso por si só já
+resolve, de graça, o problema original que motivava ler "Plano da
+Semana" antes de reescrever: sem sobrescrita total, não existe mais o
+risco de apagar linha nenhuma por acidente. Efeito colateral aceito
+conscientemente: uma atividade corrigida ou apagada direto no Postgres
+não é mais refletida automaticamente na planilha (ver seção 11) -- caso
+raro, sem lógica de reconciliação.
+
+As linhas de dia planejado usam uma segunda operação de upsert, por
+`data` em vez de `activity_id` (não têm atividade real associada até
+acontecerem): `analisar_com_ia.py`, no domingo, insere os 7 dias da
+semana com status `PLANEJADO`. `planilha_desempenho.py` (job diário),
+além de inserir atividades novas por `activity_id` como sempre, também
+atualiza a linha de dia planejado correspondente à data (se existir) com
+o resultado -- `REALIZADO_DENTRO_DA_MARGEM`, `REALIZADO_FORA_DA_MARGEM`
+ou `NÃO_REALIZADO` (dia já passado sem atividade correspondente). Nenhuma
+das duas operações lê ou reescreve a aba inteira -- cada uma toca só a
+linha que precisa.
+
+Lembrete diário: `sync_atividades.yml` (job diário já existente) passa a
+mandar um e-mail curto quando o dia anterior ficou `NÃO_REALIZADO` ou
+`REALIZADO_FORA_DA_MARGEM` -- só dispara e-mail quando há algo a avisar.
+Sem retroalimentação nesta fase: o resultado da verificação **não** entra
+no prompt da análise semanal nem vira guardrail -- é só informativo.
+
+**Critérios de aceite:**
+- [ ] Um dia planejado sem atividade correspondente aparece como `NÃO_REALIZADO` na aba "Atividades" depois do sync diário.
+- [ ] Um dia com atividade dentro de todas as margens aparece como `REALIZADO_DENTRO_DA_MARGEM`; fora de qualquer margem, `REALIZADO_FORA_DA_MARGEM`.
+- [ ] Duas atividades no mesmo dia são somadas antes da comparação, não tratadas como linhas separadas.
+- [ ] Rodar o job diário duas vezes seguidas não duplica linha nem perde as linhas de dia planejado escritas no domingo.
+- [ ] E-mail diário de lembrete só chega quando há pelo menos um dia `NÃO_REALIZADO`/`REALIZADO_FORA_DA_MARGEM` no dia anterior -- testado com e sem pendência.
+- [ ] `escrever_atividades` não reescreve linhas de atividade já presentes na planilha -- só insere as novas (upsert por `activity_id`, sem sobrescrita total).
+
+### Fase 10 — Filtro de tokens (rede de segurança pro Gemini)
+**Requisitos:** antes de cada chamada a `gerar_analise()`, contar os
+tokens do prompt final via `count_tokens` da API do Gemini (contagem
+exata, não estimativa por caractere). Teto: 200 mil tokens -- bem abaixo
+do limite real do modelo (até 1M), calibrado como sinal de que algo fugiu
+do esperado (ex. observação colada por engano, bug na janela de 4
+semanas), não como limite operacional do dia a dia. Acima do teto, a
+execução aborta com mensagem clara (`RuntimeError`, mesmo padrão do
+fail-fast de `conectar()` em `extract/garmin.py`) -- sem gerar plano
+nenhum. O retry do workflow (`nick-fields/retry`, Fase 8) tenta de novo;
+se persistir, dispara o e-mail padrão do GitHub de falha de workflow
+agendado.
+
+**Critérios de aceite:**
+- [ ] Prompt real (janela de 4 semanas atual) passa longe do teto -- confirma que o filtro não atrapalha a operação normal.
+- [ ] Um prompt sintético acima de 200 mil tokens aborta a execução com mensagem clara, sem chamar `gerar_analise()`.
+- [ ] A contagem usa a API do Gemini (`count_tokens`), não uma aproximação local.
+
+### Fase 11 — Revisão de coerência do plano gerado
+**Requisitos:** depois de `_plano_semanal()` validar o schema (7 dias),
+uma segunda chamada ao Gemini recebe o prompt original + o plano gerado +
+quais guardrails dispararam (ACWR, dor) e devolve um veredito estruturado
+via `response_schema` próprio (`coerente: bool`, `motivo: str`,
+`problemas: list[str]`) -- mesmo padrão de saída estruturada já usado na
+geração do plano, não texto livre. A revisão cobre três coisas:
+inconsistência interna (o `motivo` de um dia não bate com o tipo/
+distância/intensidade escolhidos), contradição com o histórico/dados de
+entrada, e violação de guardrail que tenha escapado da restrição de
+vocabulário (ex. intensidade alta disfarçada dentro de um treino
+rotulado como Rodagem, numa semana em que o guardrail de dor deveria ter
+restringido o vocabulário).
+
+Se a revisão reprovar, gera o plano de novo (nova chamada a
+`gerar_analise()` com o mesmo prompt) e revisa de novo, até 3 tentativas
+no total. Se todas reprovarem, aborta com erro claro (mesmo padrão
+fail-fast das Fases 9 e 10) -- sem enviar plano nenhum pra semana.
+Reprovações ficam registradas só no log da execução do GitHub Actions
+(print no stdout), sem linha nova na planilha -- é esperado ser raro.
+
+**Critérios de aceite:**
+- [ ] Plano coerente (dado real) é aprovado na primeira revisão, sem gerar retry desnecessário.
+- [ ] Um plano construído propositalmente com inconsistência (ex. motivo que contradiz o tipo de treino) é reprovado pela revisão.
+- [ ] Esgotadas as 3 tentativas sem aprovação, a execução aborta com mensagem clara, sem chamar `escrever_plano`/`enviar_email_resumo`.
+
+### Fase 12 — Ajuste fino
 Frequência de polling, prompt, extras — a definir com base no uso real.
 
 ## 8. Riscos e decisões (atualizado)
@@ -747,7 +846,7 @@ Decisões da sessão de 2026-08-17 (Fase 8), para referência futura:
   momento; mitigação é monitorar falhas (guardrail de `conectar()` abaixo)
   e reautenticar localmente quando acontecer, não uma solução preventiva
   mais robusta (ex. `actions/cache` auto-atualizável), que ficaria pra
-  Fase 9 se o problema realmente aparecer na prática.
+  Fase 12 (Ajuste fino) se o problema realmente aparecer na prática.
 - **`conectar()` falha rápido em CI sem senha**: sem isso, um token
   expirado em produção faria o código cair no loop de `getpass()`/
   `input()` esperando senha/MFA -- num runner sem terminal, isso trava até
@@ -814,3 +913,59 @@ Decisões da sessão de 2026-08-17 (Fase 8), para referência futura:
   etapa de export -- não há nada pra pré-popular, é uma nota livre por
   semana. Lida com a mesma janela `JANELA_SEMANAS` dos outros dados, pra
   manter consistência de "o que a IA vê" através do prompt inteiro.
+
+Decisões da sessão de grilling de 2026-09-08 (Fases 9, 10 e 11), para
+referência futura:
+
+- **Verificação de aderência não realimenta o prompt (por enquanto)**:
+  primeira ideia era usar a aderência como sinal pra IA gerar a semana
+  seguinte, ou até como um terceiro guardrail. Decisão explícita do
+  usuário: manter informativo por ora -- introduzir um sinal novo, ainda
+  não validado contra dado real, dentro da lógica que já tem dois
+  guardrails determinísticos, é exatamente o tipo de heurística que este
+  projeto evita adotar sem antes ver como ela se comporta na prática.
+- **Linhas de dia planejado na aba "Atividades", não uma aba nova**: pedido
+  explícito do usuário, ao contrário da primeira proposta (aba
+  "Aderência" dedicada). Consequência arquitetural encontrada durante o
+  grilling: `escrever_atividades` (`planilha_desempenho.py`, job diário)
+  sobrescreve a aba inteira só a partir de `vw_sessoes` -- sem mudança,
+  o sync do dia seguinte apagaria as linhas de plano escritas no domingo.
+  Resolvido fazendo o job diário ler a aba "Plano da Semana" via Sheets
+  API antes de reconstruir "Atividades", em vez de criar uma tabela nova
+  no Postgres pro plano -- menos mudança de schema, e a aba "Plano da
+  Semana" já tem exatamente as colunas necessárias.
+- **Lembrete diário, não semanal**: o pedido original ("lembrar de repor
+  no dia seguinte") só faz sentido com checagem diária -- um e-mail só
+  no domingo avisaria até 6 dias depois de um treino perdido na terça.
+  Resolvido estendendo `sync_atividades.yml` (já roda todo dia) em vez de
+  esperar o e-mail semanal de `analise_semanal.yml`.
+- **Filtro de tokens é rede de segurança, não limite operacional**: a
+  janela de 4 semanas já mantém o prompt bem abaixo de qualquer teto
+  realista, e o teto de 200 mil tokens (bem abaixo do limite real de 1M
+  do Gemini) foi calibrado pra nunca disparar em operação normal -- serve
+  só pra pegar algo que fugiu do esperado (bug de janela, dado colado por
+  engano), não pra podar prompt em uso legítimo.
+- **Revisão de coerência é chamada separada, não autoavaliação na mesma
+  resposta**: pedir pro modelo se autoavaliar na mesma resposta que gera
+  o plano tende a ser menos crítico que uma segunda chamada fresca focada
+  só em revisar -- mesmo racional de manter a chamada de geração isolada
+  (seção 4), aplicado aqui a uma segunda responsabilidade.
+- **Retry de até 3 tentativas antes de abortar, sem plano de fallback
+  fixo**: descartada a opção de cair num plano conservador padrão quando
+  a revisão reprova -- preferiu-se abortar com erro claro (mesmo padrão
+  fail-fast das Fases 9 e 10) a mandar silenciosamente um plano genérico
+  sem o usuário saber que a geração normal falhou.
+- **`escrever_atividades`: sobrescrita total -> upsert por `activity_id`**:
+  ajuste feito depois do desenho inicial da Fase 9, a pedido explícito do
+  usuário -- reescrever a aba "Atividades" inteira a cada execução diária
+  é trabalho que cresce sem limite conforme o histórico acumula (cada
+  atividade que já existia é reenviada de novo pra API do Sheets, todo
+  dia, pro resto da vida do projeto). Trocado por upsert: só a atividade
+  nova é inserida, a existente não é tocada. Isso também tornou
+  desnecessário o plano original de ler "Plano da Semana" antes de
+  reconstruir a aba inteira (sem sobrescrita total, não há mais risco de
+  apagar a linha de dia planejado por acidente). Efeito colateral aceito
+  conscientemente: uma atividade corrigida ou apagada direto no Postgres
+  deixa de se refletir automaticamente na planilha -- decisão explícita
+  do usuário de não pagar o custo de uma lógica de reconciliação (diff
+  completo Postgres x planilha) pra cobrir um caso raro.
