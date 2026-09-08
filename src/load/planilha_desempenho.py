@@ -18,20 +18,43 @@ FORMATADORES abaixo arredondam cada coluna pro nível de precisão que faz
 sentido pra ela antes de escrever na planilha.
 """
 
+import re
+from datetime import date, timedelta
 from functools import partial
 
+import gspread
 import psycopg
 
 from src.db import conectar
+from src.email_util import enviar_email
 from src.planilha import conectar as conectar_planilha, inserir_linhas_no_topo, obter_aba, sobrescrever
 
 ABA_ATIVIDADES = "Atividades"
 COR_ATIVIDADES = (0.16, 0.42, 0.75)  # azul
-COLUNAS_ATIVIDADES = [
+
+# Colunas de atividade real (upsert por activity_id, ver escrever_atividades).
+COLUNAS_REAIS = [
     "activity_id", "data", "nome", "tipo", "distancia_km", "duracao_min", "pace_min_km",
     "velocidade_media_mps", "fc_media", "fc_maxima", "cadencia_media",
     "efeito_treino_aerobico", "classificacao_atividade",
 ]
+# Colunas de dia planejado (Fase 9 -- ver analisar_com_ia.escrever_dias_planejados
+# e resolver_dias_planejados abaixo). Numa linha de atividade real, ficam em
+# branco; numa linha de dia planejado, as colunas de COLUNAS_REAIS além de
+# `data` ficam em branco até o dia ser resolvido -- aí `distancia_km`,
+# `duracao_min`, `pace_min_km` e `fc_media` passam a guardar o agregado real
+# do dia, lado a lado com o que foi planejado.
+COLUNAS_PLANO = [
+    "status", "tipo_planejado", "distancia_planejada_km", "duracao_planejada_min",
+    "pace_planejado", "fc_planejado",
+]
+COLUNAS_ATIVIDADES = COLUNAS_REAIS + COLUNAS_PLANO
+
+STATUS_PLANEJADO = "PLANEJADO"
+STATUS_REALIZADO_DENTRO_DA_MARGEM = "REALIZADO_DENTRO_DA_MARGEM"
+STATUS_REALIZADO_FORA_DA_MARGEM = "REALIZADO_FORA_DA_MARGEM"
+STATUS_NAO_REALIZADO = "NÃO_REALIZADO"
+
 # nome de exibição, quando difere da coluna real (ex.: escrevemos km/h na
 # planilha, mas a coluna em vw_sessoes -- e o valor bruto da Garmin -- é m/s)
 RENOMEAR_CABECALHO = {"velocidade_media_mps": "velocidade_media_kmh"}
@@ -153,24 +176,182 @@ def escrever_atividades(con: psycopg.Connection, spreadsheet) -> int:
     planilha, no topo (mais recente primeiro) -- nunca reescreve a aba
     inteira (ver módulo)."""
     aba = obter_aba(spreadsheet, ABA_ATIVIDADES, CABECALHO_ATIVIDADES, cor=COR_ATIVIDADES)
-    if aba.row_values(1) != CABECALHO_ATIVIDADES:
-        # aba criada antes de existir a coluna activity_id -- reconstrói o
-        # cabeçalho uma vez; com a aba "vazia" a partir daqui, o upsert
-        # abaixo já cuida de reinserir todo o histórico, sem código extra.
+    if "activity_id" not in aba.row_values(1):
+        # aba criada antes de existir a coluna activity_id -- migração
+        # única: reconstrói o cabeçalho; com a aba "vazia" a partir daqui, o
+        # upsert abaixo já cuida de reinserir todo o histórico, sem código
+        # extra. Checagem propositalmente estreita (só a ausência da coluna
+        # chave, não "cabeçalho != esperado" inteiro) -- comparação ampla
+        # dispararia de novo em qualquer divergência futura de schema e
+        # apagaria os dias planejados/resolvidos já acumulados, que não têm
+        # como ser reconstruídos a partir do Postgres (só vivem na planilha).
         aba.clear()
         aba.append_row(CABECALHO_ATIVIDADES)
 
     ja_na_planilha = _activity_ids_na_planilha(aba)
     filtro = f"WHERE activity_id NOT IN ({','.join(map(str, ja_na_planilha))})" if ja_na_planilha else ""
     linhas = con.execute(
-        f"SELECT {', '.join(COLUNAS_ATIVIDADES)} FROM vw_sessoes {filtro} ORDER BY data DESC"
+        f"SELECT {', '.join(COLUNAS_REAIS)} FROM vw_sessoes {filtro} ORDER BY data DESC"
     ).fetchall()
+    em_branco_plano = [""] * len(COLUNAS_PLANO)  # linha de atividade real não tem plano associado
     linhas_formatadas = [
-        ["" if v is None else str(v) for v in linha]
-        for linha in _formatar_linhas(COLUNAS_ATIVIDADES, linhas)
+        ["" if v is None else str(v) for v in linha] + em_branco_plano
+        for linha in _formatar_linhas(COLUNAS_REAIS, linhas)
     ]
     inserir_linhas_no_topo(aba, linhas_formatadas)
     return len(linhas)
+
+
+# Margens de tolerância pra considerar um dia "dentro do planejado" (Fase 9)
+# -- ponto de partida, ajustável depois de ver algumas semanas de dado real
+# (ver CASE_DO_PROJETO_1.md seção 7).
+MARGEM_DISTANCIA_DURACAO = 0.20  # ±20%
+MARGEM_PACE_MIN_KM = 30 / 60  # ±30s/km, em minutos decimais
+MARGEM_FC_BPM = 10
+
+
+def _parse_faixa_pace(texto: str) -> tuple[float, float] | None:
+    """'10:52-12:29 min/km' (ou só '10:52 min/km') -> (min, max) em minutos
+    decimais. `pace_alvo`/`fc_alvo` do plano são texto livre (ver TreinoDia
+    em analyze/analisar_com_ia.py) -- parse tolerante, não confia em formato
+    fixo."""
+    pares = re.findall(r"(\d+):(\d{2})", texto or "")
+    if not pares:
+        return None
+    valores = [int(m) + int(s) / 60 for m, s in pares]
+    return (min(valores), max(valores))
+
+
+def _parse_faixa_fc(texto: str) -> tuple[int, int] | None:
+    """'123-133 bpm' (ou só '130 bpm') -> (min, max)."""
+    valores = [int(v) for v in re.findall(r"\d+", texto or "")]
+    if not valores:
+        return None
+    return (min(valores), max(valores))
+
+
+def _dentro_margem_percentual(planejado: float, real: float, margem: float) -> bool:
+    return abs(real - planejado) <= planejado * margem
+
+
+def _dentro_faixa_com_margem(faixa: tuple[float, float] | None, real: float | None, margem: float) -> bool:
+    """Sem alvo pra comparar (faixa não pérseável) ou sem valor real (ex.
+    atividade sem FC registrada) não reprova por essa métrica -- a régua de
+    aprovação só se aplica ao que dá pra comparar de fato."""
+    if faixa is None or real is None:
+        return True
+    minimo, maximo = faixa
+    return (minimo - margem) <= real <= (maximo + margem)
+
+
+def _resolver_dia(
+    tipo_planejado: str | None,
+    distancia_planejada: float | None,
+    duracao_planejada: float | None,
+    pace_planejado_txt: str,
+    fc_planejado_txt: str,
+    atividades: list[tuple],  # (tipo_treino, distancia_km, duracao_min, fc_media)
+) -> dict:
+    """Compara o planejado do dia contra as atividades reais daquele dia
+    (0, 1 ou mais). Mais de uma atividade: soma distância/duração; pace
+    ponderado pela duração total; FC média ponderada pela duração de cada
+    atividade; tipo real é o da atividade de maior duração (a "principal"
+    do dia) -- ver critérios de aceite da Fase 9 no case do projeto."""
+    if not atividades:
+        return {"status": STATUS_NAO_REALIZADO}
+
+    distancia_real = sum(a[1] or 0 for a in atividades) or None
+    duracao_real = sum(a[2] or 0 for a in atividades) or None
+    pace_real = (duracao_real / distancia_real) if distancia_real and duracao_real else None
+    fc_real = (
+        sum((a[3] or 0) * (a[2] or 0) for a in atividades) / duracao_real
+        if duracao_real else None
+    )
+    tipo_real = max(atividades, key=lambda a: a[2] or 0)[0]
+
+    aprovado = tipo_planejado is None or tipo_real == tipo_planejado
+    if aprovado and distancia_planejada is not None and distancia_real is not None:
+        aprovado = _dentro_margem_percentual(distancia_planejada, distancia_real, MARGEM_DISTANCIA_DURACAO)
+    if aprovado and duracao_planejada is not None and duracao_real is not None:
+        aprovado = _dentro_margem_percentual(duracao_planejada, duracao_real, MARGEM_DISTANCIA_DURACAO)
+    if aprovado:
+        aprovado = _dentro_faixa_com_margem(_parse_faixa_pace(pace_planejado_txt), pace_real, MARGEM_PACE_MIN_KM)
+    if aprovado:
+        aprovado = _dentro_faixa_com_margem(_parse_faixa_fc(fc_planejado_txt), fc_real, MARGEM_FC_BPM)
+
+    status = STATUS_REALIZADO_DENTRO_DA_MARGEM if aprovado else STATUS_REALIZADO_FORA_DA_MARGEM
+    return {
+        "status": status,
+        "tipo": tipo_real,
+        "distancia_km": distancia_real,
+        "duracao_min": duracao_real,
+        "pace_min_km": pace_real,
+        "fc_media": fc_real,
+    }
+
+
+def resolver_dias_planejados(con: psycopg.Connection, spreadsheet) -> list[tuple[date, str]]:
+    """Resolve todo dia planejado (status PLANEJADO) na aba "Atividades" cuja
+    data já chegou, comparando contra `vw_sessoes` -- atualiza só as linhas
+    em questão via `batch_update` (um request só, mesmo que resolva vários
+    dias de uma vez), nunca reescreve a aba inteira. Devolve as datas
+    resolvidas nesta execução + status final, pro chamador decidir se manda
+    o lembrete diário (ver __main__)."""
+    aba = obter_aba(spreadsheet, ABA_ATIVIDADES, CABECALHO_ATIVIDADES, cor=COR_ATIVIDADES)
+    idx = {c: i for i, c in enumerate(CABECALHO_ATIVIDADES)}
+    hoje = date.today()
+
+    atualizacoes = []
+    resolvidos = []
+    for num_linha, linha in enumerate(aba.get_all_values()[1:], start=2):
+        if len(linha) <= idx["status"] or linha[idx["status"]] != STATUS_PLANEJADO:
+            continue
+        try:
+            data_planejada = date.fromisoformat(linha[idx["data"]])
+        except ValueError:
+            continue
+        if data_planejada > hoje:
+            continue  # dia ainda não chegou, mantém PLANEJADO
+
+        atividades = con.execute(
+            "SELECT tipo_treino, distancia_km, duracao_min, fc_media FROM vw_sessoes WHERE data = %s",
+            (data_planejada,),
+        ).fetchall()
+        resultado = _resolver_dia(
+            linha[idx["tipo_planejado"]] or None,
+            float(linha[idx["distancia_planejada_km"]].replace(",", ".")) if linha[idx["distancia_planejada_km"]] else None,
+            float(linha[idx["duracao_planejada_min"]].replace(",", ".")) if linha[idx["duracao_planejada_min"]] else None,
+            linha[idx["pace_planejado"]],
+            linha[idx["fc_planejado"]],
+            [(a[0], float(a[1]) if a[1] is not None else None, float(a[2]) if a[2] is not None else None,
+              float(a[3]) if a[3] is not None else None) for a in atividades],
+        )
+
+        nova_linha = list(linha) + [""] * (len(CABECALHO_ATIVIDADES) - len(linha))
+        nova_linha[idx["status"]] = resultado["status"]
+        if resultado["status"] != STATUS_NAO_REALIZADO:
+            nova_linha[idx["tipo"]] = resultado["tipo"]
+            nova_linha[idx["distancia_km"]] = _numero(resultado["distancia_km"], casas=2, remover_zero_a_direita=True)
+            nova_linha[idx["duracao_min"]] = _numero(resultado["duracao_min"], casas=1, remover_zero_a_direita=True)
+            nova_linha[idx["pace_min_km"]] = _pace(resultado["pace_min_km"])
+            nova_linha[idx["fc_media"]] = _numero(resultado["fc_media"], casas=0)
+
+        faixa = f"A{num_linha}:{gspread.utils.rowcol_to_a1(num_linha, len(CABECALHO_ATIVIDADES))}"
+        atualizacoes.append({"range": faixa, "values": [nova_linha]})
+        resolvidos.append((data_planejada, resultado["status"]))
+
+    if atualizacoes:
+        aba.batch_update(atualizacoes, value_input_option="USER_ENTERED")
+    return resolvidos
+
+
+def _texto_lembrete(pendencias: list[tuple[date, str]]) -> str:
+    linhas = ["O sync de hoje encontrou treino(s) planejado(s) que não bateram com o executado:", ""]
+    for data, status in pendencias:
+        rotulo = "não foi realizado" if status == STATUS_NAO_REALIZADO else "foi realizado fora da margem planejada"
+        linhas.append(f"- {data.strftime('%d/%m')}: {rotulo}")
+    linhas += ["", "Considere repor no próximo treino disponível."]
+    return "\n".join(linhas)
 
 
 def escrever_resumo_semanal(con: psycopg.Connection, spreadsheet) -> int:
@@ -188,6 +369,20 @@ if __name__ == "__main__":
 
     n_ativ = escrever_atividades(con, spreadsheet)
     print(f"{n_ativ} atividade(s) escrita(s) na aba '{ABA_ATIVIDADES}'.")
+
+    resolvidos = resolver_dias_planejados(con, spreadsheet)
+    if resolvidos:
+        detalhe = ", ".join(f"{d.strftime('%d/%m')}={s}" for d, s in resolvidos)
+        print(f"{len(resolvidos)} dia(s) planejado(s) resolvido(s): {detalhe}")
+
+    ontem = date.today() - timedelta(days=1)
+    pendencias_ontem = [
+        (d, s) for d, s in resolvidos
+        if d == ontem and s in (STATUS_NAO_REALIZADO, STATUS_REALIZADO_FORA_DA_MARGEM)
+    ]
+    if pendencias_ontem:
+        enviar_email("Treino de ontem ficou pendente", _texto_lembrete(pendencias_ontem))
+        print(f"[e-mail de lembrete enviado -- {len(pendencias_ontem)} pendência(s) de ontem]")
 
     n_sem = escrever_resumo_semanal(con, spreadsheet)
     print(f"{n_sem} semana(s) escrita(s) na aba '{ABA_RESUMO_SEMANAL}'.")
