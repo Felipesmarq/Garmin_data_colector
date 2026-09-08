@@ -652,7 +652,7 @@ no prompt da análise semanal nem vira guardrail -- é só informativo.
 - [ ] Duas atividades no mesmo dia são somadas antes da comparação, não tratadas como linhas separadas.
 - [ ] Rodar o job diário duas vezes seguidas não duplica linha nem perde as linhas de dia planejado escritas no domingo.
 - [ ] E-mail diário de lembrete só chega quando há pelo menos um dia `NÃO_REALIZADO`/`REALIZADO_FORA_DA_MARGEM` no dia anterior -- testado com e sem pendência.
-- [ ] `escrever_atividades` não reescreve linhas de atividade já presentes na planilha -- só insere as novas (upsert por `activity_id`, sem sobrescrita total).
+- [x] `escrever_atividades` não reescreve linhas de atividade já presentes na planilha -- só insere as novas (upsert por `activity_id`, sem sobrescrita total). Testado em 2026-09-08 contra o Neon e a planilha reais: migração automática do cabeçalho (15 atividades reescritas com a coluna nova, ordem mais-recente-primeiro preservada) e, na segunda execução, 0 atividades reinseridas.
 
 ### Fase 10 — Filtro de tokens (rede de segurança pro Gemini)
 **Requisitos:** antes de cada chamada a `gerar_analise()`, contar os
