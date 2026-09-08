@@ -36,6 +36,7 @@ from pydantic import BaseModel
 
 from src.db import conectar
 from src.email_util import enviar_email
+from src.tempo import hoje_brt
 from src.load.planilha_desempenho import (
     ABA_ATIVIDADES,
     CABECALHO_ATIVIDADES,
@@ -104,8 +105,14 @@ class PlanoSemanal(BaseModel):
 
 def _proxima_semana() -> list[date]:
     """Segunda a domingo da próxima semana ISO -- calculado em Python, não
-    pedido ao LLM (aritmética de data não é trabalho pra prompt)."""
-    hoje = date.today()
+    pedido ao LLM (aritmética de data não é trabalho pra prompt).
+
+    `hoje_brt()`, não `date.today()`: essa conta roda no domingo à noite,
+    e um atraso de agendamento no cron (comum no GitHub Actions) pode
+    empurrar a execução pra depois da meia-noite UTC -- `date.today()`
+    já seria segunda-feira ali, e a conta pularia a semana inteira (bug
+    real, ver CASE_DO_PROJETO_1.md seção 11)."""
+    hoje = hoje_brt()
     proxima_segunda = hoje + timedelta(days=7 - hoje.weekday())
     return [proxima_segunda + timedelta(days=i) for i in range(7)]
 
@@ -185,7 +192,7 @@ def _observacoes_recentes(spreadsheet: gspread.Spreadsheet) -> str:
     nenhuma -- é 100% input manual, mesmo espírito da aba "Dor" mas sem a
     parte de export."""
     aba = obter_aba(spreadsheet, ABA_OBSERVACOES, CABECALHO_OBSERVACOES, cor=COR_OBSERVACOES)
-    corte = date.today() - timedelta(weeks=JANELA_SEMANAS)
+    corte = hoje_brt() - timedelta(weeks=JANELA_SEMANAS)
     recentes = []
     for registro in aba.get_all_records():
         semana_txt = str(registro.get("semana_inicio", "")).strip()
@@ -535,10 +542,13 @@ def enviar_email_resumo(plano: PlanoSemanal, dias: list[date]) -> None:
 if __name__ == "__main__":
     con = conectar()
 
+    # data em BRT, não CURRENT_DATE do Postgres (servidor roda em UTC) --
+    # mesmo cuidado de _proxima_semana, ver hoje_brt().
+    corte_janela = hoje_brt() - timedelta(days=JANELA_SEMANAS * 7)
     colunas_ativ, linhas_ativ = _consultar(
         con,
-        "SELECT * FROM vw_sessoes_ia WHERE data >= CURRENT_DATE - (%s * INTERVAL '1 day') ORDER BY data",
-        (JANELA_SEMANAS * 7,),
+        "SELECT * FROM vw_sessoes_ia WHERE data >= %s ORDER BY data",
+        (corte_janela,),
     )
     colunas_resumo, linhas_resumo_desc = _consultar(
         con, "SELECT * FROM vw_resumo_semanal ORDER BY semana_inicio DESC LIMIT %s", (JANELA_SEMANAS,)
