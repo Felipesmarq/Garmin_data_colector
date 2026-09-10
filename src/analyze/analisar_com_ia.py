@@ -55,6 +55,10 @@ MODELO_PADRAO = "gemini-3.5-flash"
 # (até 1M) -- ver gerar_analise().
 TETO_TOKENS = 200_000
 
+# Fase 11 -- máximo de tentativas (gerar + revisar) antes de desistir e
+# abortar, sem cair num plano de fallback fixo -- ver __main__.
+MAX_TENTATIVAS_REVISAO = 3
+
 DIAS_SEMANA_PT = ["Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado", "Domingo"]
 
 ZONA_SEGURA_MIN = 0.8
@@ -105,6 +109,15 @@ class PlanoSemanal(BaseModel):
     dias: list[TreinoDia]
     estimativas_futuras: list[EstimativaFutura] = []
     logica_geral: str
+
+
+class RevisaoCoerencia(BaseModel):
+    """Fase 11 -- veredito estruturado da segunda chamada ao Gemini
+    (revisar_coerencia), não texto livre -- mesmo padrão de saída
+    estruturada da geração do plano."""
+    coerente: bool
+    motivo: str
+    problemas: list[str] = []
 
 
 def _proxima_semana() -> list[date]:
@@ -359,6 +372,27 @@ def _construir_prompt(
     return "\n".join(partes)
 
 
+def _cliente_gemini() -> tuple[genai.Client, str]:
+    load_dotenv(ROOT / ".env")
+    cliente = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    modelo = os.environ.get("GEMINI_MODEL", MODELO_PADRAO)
+    return cliente, modelo
+
+
+def _verificar_teto_tokens(cliente: genai.Client, modelo: str, texto: str) -> None:
+    """Fase 10 -- rede de segurança, não limite operacional: a janela de 4
+    semanas já mantém o prompt bem abaixo disso; um teto bem abaixo do
+    limite real do Gemini (até 1M) pega algo que fugiu do esperado (bug de
+    janela, observação colada por engano) antes de gastar uma chamada de
+    geração/revisão em cima de um prompt fora do normal."""
+    contagem = cliente.models.count_tokens(model=modelo, contents=texto)
+    if contagem.total_tokens > TETO_TOKENS:
+        raise RuntimeError(
+            f"Prompt com {contagem.total_tokens} tokens, acima do teto de {TETO_TOKENS} -- "
+            "algo fugiu do esperado (não é limite normal de operação). Abortando."
+        )
+
+
 def gerar_analise(prompt: str) -> str:
     """Chamada ao LLM isolada nesta função -- ver docstring do módulo.
 
@@ -368,22 +402,8 @@ def gerar_analise(prompt: str) -> str:
     contida nesta função, então trocar de provedor continua sendo só
     reescrever `gerar_analise`.
     """
-    load_dotenv(ROOT / ".env")
-    cliente = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-    modelo = os.environ.get("GEMINI_MODEL", MODELO_PADRAO)
-
-    # Fase 10 -- rede de segurança, não limite operacional: a janela de 4
-    # semanas já mantém o prompt bem abaixo disso; um teto bem abaixo do
-    # limite real do Gemini (até 1M) pega algo que fugiu do esperado (bug
-    # de janela, observação colada por engano) antes de gastar a chamada
-    # de geração em cima de um prompt fora do normal.
-    contagem = cliente.models.count_tokens(model=modelo, contents=prompt)
-    if contagem.total_tokens > TETO_TOKENS:
-        raise RuntimeError(
-            f"Prompt com {contagem.total_tokens} tokens, acima do teto de {TETO_TOKENS} -- "
-            "algo fugiu do esperado (não é limite normal de operação). Abortando antes de "
-            "gerar o plano."
-        )
+    cliente, modelo = _cliente_gemini()
+    _verificar_teto_tokens(cliente, modelo, prompt)
 
     resposta = cliente.models.generate_content(
         model=modelo,
@@ -404,6 +424,67 @@ def gerar_analise(prompt: str) -> str:
     if finalizacao not in (types.FinishReason.STOP, None) or not resposta.text:
         raise RuntimeError(f"Gemini não completou a resposta (finish_reason={finalizacao}).")
     return resposta.text
+
+
+def _construir_prompt_revisao(prompt_original: str, plano_texto: str) -> str:
+    return "\n".join([
+        "Você é um revisor cético, independente de quem gerou o plano abaixo -- sua única "
+        "função é encontrar problemas, não elogiar o trabalho. Considere o contexto e as "
+        "instruções originais que levaram a esse plano:",
+        "",
+        prompt_original,
+        "",
+        "=" * 40,
+        "PLANO GERADO A PARTIR DESSE CONTEXTO:",
+        "=" * 40,
+        plano_texto,
+        "",
+        "Avalie o plano contra três critérios -- qualquer um deles, sozinho, reprova o "
+        "plano:",
+        "1. Inconsistência interna: o `motivo` de algum dia contradiz o tipo de treino, "
+        "distância, duração, pace ou FC escolhidos pra aquele dia.",
+        "2. Contradição com os dados de entrada: o plano ignora um sinal óbvio dos dados "
+        "(atividades, resumo semanal, observações do corredor) sem justificativa no motivo.",
+        "3. Violação de guardrail: se havia alguma instrução obrigatória de guardrail no "
+        "contexto acima (ACWR fora da zona segura, ou dor recente exigindo restrição de "
+        "intensidade), confira se o plano realmente a respeitou -- inclusive de forma "
+        "disfarçada (ex. um treino rotulado como Rodagem/Recuperação mas com distância, "
+        "duração, pace ou FC incompatíveis com baixa intensidade).",
+        "",
+        "Responda `coerente: true` só se o plano passar nos três critérios. Se reprovar, "
+        "`coerente: false` e liste em `problemas` cada item específico encontrado (não "
+        "genérico -- diga qual dia, qual campo, qual contradição), e em `motivo` um resumo "
+        "de uma frase.",
+    ])
+
+
+def revisar_coerencia(prompt_original: str, plano_texto: str) -> RevisaoCoerencia:
+    """Fase 11 -- segunda chamada ao Gemini, independente da que gerou o
+    plano (não autoavaliação na mesma resposta, ver CASE_DO_PROJETO_1.md
+    seção 11) -- avalia coerência interna, contradição com os dados de
+    entrada e violação de guardrail que tenha escapado da restrição de
+    vocabulário. Recebe o prompt original (que já contém os dados e as
+    instruções de guardrail que dispararam, se algum) + o plano gerado."""
+    cliente, modelo = _cliente_gemini()
+    prompt_revisao = _construir_prompt_revisao(prompt_original, plano_texto)
+    _verificar_teto_tokens(cliente, modelo, prompt_revisao)
+
+    resposta = cliente.models.generate_content(
+        model=modelo,
+        contents=prompt_revisao,
+        config=types.GenerateContentConfig(
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+            response_mime_type="application/json",
+            response_schema=RevisaoCoerencia,
+        ),
+    )
+    if not resposta.candidates:
+        motivo = resposta.prompt_feedback.block_reason if resposta.prompt_feedback else "desconhecido"
+        raise RuntimeError(f"Gemini bloqueou o prompt de revisão (motivo: {motivo}).")
+    finalizacao = resposta.candidates[0].finish_reason
+    if finalizacao not in (types.FinishReason.STOP, None) or not resposta.text:
+        raise RuntimeError(f"Gemini não completou a revisão (finish_reason={finalizacao}).")
+    return RevisaoCoerencia.model_validate_json(resposta.text)
 
 
 def _plano_semanal(texto_json: str) -> PlanoSemanal:
@@ -593,7 +674,25 @@ if __name__ == "__main__":
         instrucoes,
         dias,
     )
-    plano = _plano_semanal(gerar_analise(prompt))
+    plano = None
+    for tentativa in range(1, MAX_TENTATIVAS_REVISAO + 1):
+        candidato = _plano_semanal(gerar_analise(prompt))
+        revisao = revisar_coerencia(prompt, _texto_plano(candidato, dias))
+        if revisao.coerente:
+            plano = candidato
+            if tentativa > 1:
+                print(f"[plano aprovado pela revisão de coerência na tentativa {tentativa}/{MAX_TENTATIVAS_REVISAO}]")
+            break
+        print(f"[revisão reprovou a tentativa {tentativa}/{MAX_TENTATIVAS_REVISAO}: {revisao.motivo}]")
+        for problema in revisao.problemas:
+            print(f"  - {problema}")
+
+    if plano is None:
+        raise RuntimeError(
+            f"Plano reprovado pela revisão de coerência em {MAX_TENTATIVAS_REVISAO} "
+            "tentativas seguidas -- abortando sem escrever na planilha nem enviar e-mail."
+        )
+
     _imprimir_plano(plano, dias)
 
     n = escrever_plano(spreadsheet, plano, dias)
