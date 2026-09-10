@@ -674,29 +674,39 @@ agendado.
 
 ### Fase 11 — Revisão de coerência do plano gerado
 **Requisitos:** depois de `_plano_semanal()` validar o schema (7 dias),
-uma segunda chamada ao Gemini recebe o prompt original + o plano gerado +
-quais guardrails dispararam (ACWR, dor) e devolve um veredito estruturado
-via `response_schema` próprio (`coerente: bool`, `motivo: str`,
+uma segunda chamada ao Gemini (`revisar_coerencia`, isolada de
+`gerar_analise` -- não autoavaliação na mesma resposta, ver seção 11)
+recebe o prompt original + o plano gerado (em texto, via `_texto_plano`)
+e devolve um veredito estruturado via `response_schema` próprio
+(`RevisaoCoerencia`: `coerente: bool`, `motivo: str`,
 `problemas: list[str]`) -- mesmo padrão de saída estruturada já usado na
-geração do plano, não texto livre. A revisão cobre três coisas:
-inconsistência interna (o `motivo` de um dia não bate com o tipo/
-distância/intensidade escolhidos), contradição com o histórico/dados de
-entrada, e violação de guardrail que tenha escapado da restrição de
-vocabulário (ex. intensidade alta disfarçada dentro de um treino
-rotulado como Rodagem, numa semana em que o guardrail de dor deveria ter
-restringido o vocabulário).
+geração do plano, não texto livre. Quais guardrails dispararam **não** é
+passado como argumento separado -- já vem embutido no prompt original
+(`instrucoes_guardrail` já é concatenado em `_construir_prompt`), então
+reenviar o prompt inteiro pro revisor já carrega essa informação, sem
+duplicar. A revisão cobre três coisas: inconsistência interna (o
+`motivo` de um dia não bate com o tipo/distância/intensidade
+escolhidos), contradição com o histórico/dados de entrada, e violação de
+guardrail que tenha escapado da restrição de vocabulário (ex.
+intensidade alta disfarçada dentro de um treino rotulado como Rodagem,
+numa semana em que o guardrail de dor deveria ter restringido o
+vocabulário).
 
 Se a revisão reprovar, gera o plano de novo (nova chamada a
-`gerar_analise()` com o mesmo prompt) e revisa de novo, até 3 tentativas
-no total. Se todas reprovarem, aborta com erro claro (mesmo padrão
-fail-fast das Fases 9 e 10) -- sem enviar plano nenhum pra semana.
-Reprovações ficam registradas só no log da execução do GitHub Actions
-(print no stdout), sem linha nova na planilha -- é esperado ser raro.
+`gerar_analise()` com o mesmo prompt) e revisa de novo, até
+`MAX_TENTATIVAS_REVISAO` (3) tentativas no total. Se todas reprovarem,
+aborta com `RuntimeError` claro (mesmo padrão fail-fast das Fases 9 e
+10) -- sem chamar `escrever_plano`/`escrever_dias_planejados`/
+`enviar_email_resumo`. Reprovações ficam registradas só no log da
+execução do GitHub Actions (print no stdout), sem linha nova na
+planilha -- é esperado ser raro. O teto de tokens da Fase 10 também se
+aplica ao prompt de revisão (reutiliza `_verificar_teto_tokens`), já que
+ele embute o prompt original inteiro e por isso é ainda maior.
 
 **Critérios de aceite:**
-- [ ] Plano coerente (dado real) é aprovado na primeira revisão, sem gerar retry desnecessário.
-- [ ] Um plano construído propositalmente com inconsistência (ex. motivo que contradiz o tipo de treino) é reprovado pela revisão.
-- [ ] Esgotadas as 3 tentativas sem aprovação, a execução aborta com mensagem clara, sem chamar `escrever_plano`/`enviar_email_resumo`.
+- [x] Plano coerente (dado real) é aprovado na primeira revisão, sem gerar retry desnecessário. Testado em 2026-09-10 com plano real gerado pelo Gemini -- `coerente=True` na primeira tentativa.
+- [x] Um plano construído propositalmente com inconsistência (ex. motivo que contradiz o tipo de treino) é reprovado pela revisão. Testado com um dia rotulado "Rodagem/Recuperação" mas com motivo/pace/FC de um treino de tiros máximos, numa semana com guardrail de dor ativo (nível 3) -- reprovado com 3 problemas específicos listados (dia, campo, contradição), não genéricos.
+- [x] Esgotadas as 3 tentativas sem aprovação, a execução aborta com mensagem clara, sem chamar `escrever_plano`/`enviar_email_resumo`. Testado com `revisar_coerencia`/`gerar_analise` simulados (sempre reprova) -- confirmado exatamente `MAX_TENTATIVAS_REVISAO` chamadas de geração, zero chamadas a `escrever_plano`, `RuntimeError` levantado.
 
 ### Fase 12 — Ajuste fino
 Frequência de polling, prompt, extras — a definir com base no uso real.
@@ -1056,3 +1066,35 @@ garmin.py`) e o loop de backfill de `load_recuperacao.py`.
 UTC): convertido pra BRT dá 2026-09-06 (domingo), e a partir daí
 `_proxima_semana()` calcula corretamente 07/09 -- confirma que a correção
 teria evitado o bug real observado.
+
+## Implementação da Fase 11 (2026-09-10)
+
+- **Chamada de revisão isolada, reaproveitando o prompt original em vez
+  de reconstruir contexto**: em vez de passar "quais guardrails
+  dispararam" como argumento separado pro revisor, reenvia o prompt
+  original inteiro -- as instruções de guardrail (`instrucoes_guardrail`)
+  já estão concatenadas nele por `_construir_prompt`. Evita duplicar
+  lógica de detecção de guardrail entre a geração e a revisão, e garante
+  que o revisor veja exatamente o mesmo contexto que gerou o plano, sem
+  risco de ficar dessincronizado se `_construir_prompt` mudar no futuro.
+- **`_verificar_teto_tokens` extraída como função compartilhada**: o teto
+  de tokens da Fase 10 se aplicava só a `gerar_analise`; como a revisão
+  (Fase 11) manda um prompt ainda maior (o prompt original inteiro + o
+  plano gerado), o mesmo risco existe lá, então a checagem foi extraída
+  pra ser reaproveitada nas duas chamadas em vez de duplicada.
+- **Reprovação testada com um caso de violação disfarçada**: montado um
+  plano sintético com um dia rotulado `Rodagem/Recuperação` mas com
+  `motivo`, pace (4:00 min/km) e FC (185-195 bpm) de um treino de tiros
+  máximos, numa semana com o guardrail de dor ativo (nível 3, que deveria
+  restringir a semana inteira a Rodagem/Recuperação ou Longão de verdade).
+  O revisor reprovou corretamente, citando os três problemas específicos
+  (dia, campos incompatíveis, contradição com o guardrail) -- não uma
+  resposta genérica.
+- **Teste do esgotamento de tentativas via simulação, não indução real**:
+  como o Gemini normalmente produz planos coerentes, não dava pra contar
+  com 3 reprovações reais seguidas pra testar o `RuntimeError` final.
+  Testado simulando `gerar_analise`/`revisar_coerencia` (sempre reprova)
+  e confirmando que o loop chama `gerar_analise` exatamente
+  `MAX_TENTATIVAS_REVISAO` vezes, nunca chama `escrever_plano`, e levanta
+  o erro esperado -- valida a lógica de controle sem depender de sorte
+  numa chamada real ao Gemini.

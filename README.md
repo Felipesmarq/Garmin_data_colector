@@ -242,16 +242,17 @@ e escrito na planilha ponta a ponta, guardrails de ACWR/dor confirmados
 disparando). Fase 8 (GitHub Actions) com os workflows escritos e
 validados sintaticamente, pendente de: você configurar os Secrets
 (comandos acima) e deixar rodar pelo menos 2 semanas sem intervenção
-manual pra fechar o critério de aceite. Fases 9 e 10 (verificação de
-aderência, filtro de tokens) implementadas e **validadas contra o Neon,
-a planilha e o Gemini reais** (comparação com margem, soma de múltiplas
-atividades no dia, upsert idempotente, e-mail de lembrete testado, teto
-de tokens confirmado com prompt real e sintético). Também corrigido um
-bug real de fuso horário que fazia o plano semanal ser gerado pra semana
+manual pra fechar o critério de aceite. Fases 9 a 11 (verificação de
+aderência, filtro de tokens, revisão de coerência) implementadas e
+**validadas contra o Neon, a planilha e o Gemini reais** (comparação com
+margem, soma de múltiplas atividades no dia, upsert idempotente, e-mail
+de lembrete testado, teto de tokens confirmado com prompt real e
+sintético, revisão de coerência aprovando plano real e reprovando plano
+sintético com violação disfarçada de guardrail). Também corrigido um bug
+real de fuso horário que fazia o plano semanal ser gerado pra semana
 errada quando o cron do GitHub Actions atrasava (ver seção 11 do case).
-Fase 11 (revisão de coerência) desenhada em sessão de grilling, ainda não
-implementada. Falta: Fase 12 (ajuste fino). Roadmap completo e critérios
-de aceite por fase na seção 7 do
+Falta: Fase 12 (ajuste fino). Roadmap completo e critérios de aceite por
+fase na seção 7 do
 [`docs/CASE_DO_PROJETO_1.md`](docs/CASE_DO_PROJETO_1.md).
 
 ## Solução de problemas
