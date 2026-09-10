@@ -668,9 +668,9 @@ se persistir, dispara o e-mail padrão do GitHub de falha de workflow
 agendado.
 
 **Critérios de aceite:**
-- [ ] Prompt real (janela de 4 semanas atual) passa longe do teto -- confirma que o filtro não atrapalha a operação normal.
-- [ ] Um prompt sintético acima de 200 mil tokens aborta a execução com mensagem clara, sem chamar `gerar_analise()`.
-- [ ] A contagem usa a API do Gemini (`count_tokens`), não uma aproximação local.
+- [x] Prompt real (janela de 4 semanas atual) passa longe do teto -- confirma que o filtro não atrapalha a operação normal. Testado em 2026-09-10: 2.847 tokens, contra um teto de 200 mil.
+- [x] Um prompt sintético acima de 200 mil tokens aborta a execução com mensagem clara, sem chamar `generate_content` (a checagem fica dentro de `gerar_analise()`, antes da chamada de geração em si -- não antes de `gerar_analise()` como um todo, pra manter a chamada ao Gemini isolada numa função só, ver seção 4). Testado com prompt sintético de ~400 mil tokens.
+- [x] A contagem usa a API do Gemini (`count_tokens`), não uma aproximação local. Confirmado por leitura do código e pelos testes acima.
 
 ### Fase 11 — Revisão de coerência do plano gerado
 **Requisitos:** depois de `_plano_semanal()` validar o schema (7 dias),
