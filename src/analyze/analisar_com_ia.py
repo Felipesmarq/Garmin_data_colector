@@ -51,6 +51,10 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 JANELA_SEMANAS = 4
 MODELO_PADRAO = "gemini-3.5-flash"
 
+# Fase 10 -- teto de tokens do prompt, bem abaixo do limite real do Gemini
+# (até 1M) -- ver gerar_analise().
+TETO_TOKENS = 200_000
+
 DIAS_SEMANA_PT = ["Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado", "Domingo"]
 
 ZONA_SEGURA_MIN = 0.8
@@ -367,6 +371,20 @@ def gerar_analise(prompt: str) -> str:
     load_dotenv(ROOT / ".env")
     cliente = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
     modelo = os.environ.get("GEMINI_MODEL", MODELO_PADRAO)
+
+    # Fase 10 -- rede de segurança, não limite operacional: a janela de 4
+    # semanas já mantém o prompt bem abaixo disso; um teto bem abaixo do
+    # limite real do Gemini (até 1M) pega algo que fugiu do esperado (bug
+    # de janela, observação colada por engano) antes de gastar a chamada
+    # de geração em cima de um prompt fora do normal.
+    contagem = cliente.models.count_tokens(model=modelo, contents=prompt)
+    if contagem.total_tokens > TETO_TOKENS:
+        raise RuntimeError(
+            f"Prompt com {contagem.total_tokens} tokens, acima do teto de {TETO_TOKENS} -- "
+            "algo fugiu do esperado (não é limite normal de operação). Abortando antes de "
+            "gerar o plano."
+        )
+
     resposta = cliente.models.generate_content(
         model=modelo,
         contents=prompt,
