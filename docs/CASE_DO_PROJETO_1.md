@@ -708,7 +708,71 @@ ele embute o prompt original inteiro e por isso é ainda maior.
 - [x] Um plano construído propositalmente com inconsistência (ex. motivo que contradiz o tipo de treino) é reprovado pela revisão. Testado com um dia rotulado "Rodagem/Recuperação" mas com motivo/pace/FC de um treino de tiros máximos, numa semana com guardrail de dor ativo (nível 3) -- reprovado com 3 problemas específicos listados (dia, campo, contradição), não genéricos.
 - [x] Esgotadas as 3 tentativas sem aprovação, a execução aborta com mensagem clara, sem chamar `escrever_plano`/`enviar_email_resumo`. Testado com `revisar_coerencia`/`gerar_analise` simulados (sempre reprova) -- confirmado exatamente `MAX_TENTATIVAS_REVISAO` chamadas de geração, zero chamadas a `escrever_plano`, `RuntimeError` levantado.
 
-### Fase 12 — Ajuste fino
+### Fase 12 — Enviar o plano da semana como treino estruturado pro relógio
+**Requisitos:** depois que o plano é aprovado pela revisão de coerência
+(Fase 11) -- nunca por tentativa/candidato reprovado -- cria um treino
+estruturado no Garmin Connect (`RunningWorkout`, biblioteca
+`garminconnect` já usada no projeto, sem dependência nova) pra cada dia
+de treino da semana (dias de descanso não geram treino nenhum). Passos
+por dia: aquecimento opcional, o treino principal (por distância se
+`distancia_km` estiver preenchido, por duração se for `duracao_min`), e
+desaquecimento -- usando `create_warmup_step`/`create_distance_interval_step`/
+`create_interval_step`/`create_cooldown_step`.
+
+Alvo do passo principal depende do tipo de treino, não uma escolha
+única fixa: Rodagem/Recuperação, Longão e Fartlek usam **FC** como alvo
+(foco em não passar do esforço seguro -- Fartlek entra aqui por não ter
+estrutura fixa de ritmo, o que importa é o esforço); Ritmo, Limiar,
+Intervalado e Tiro usam **pace** como alvo (foco em acertar o ritmo de
+prova/performance). O Garmin só aceita um tipo de alvo por passo, não os
+dois simultaneamente, mesmo que o relógio continue mostrando pace e FC
+ao vivo independente do alvo configurado.
+
+Nome do treino inclui tipo + data (ex. "Rodagem/Recuperação -- 15/09"),
+descrição usa o `motivo` gerado pela IA pra aquele dia -- aparece como
+contexto no relógio/app. Upload via `client.upload_running_workout(...)`
+e agendamento na data do dia via `client.schedule_workout(workout_id,
+data)`.
+
+**Falha não aborta a semana**: é best-effort -- se o upload/agendamento
+falhar (API não-oficial, pode quebrar sem aviso), registra no log e
+segue gerando a planilha e o e-mail normalmente. A recomendação em si
+(o que o projeto existe pra fazer) não fica refém de uma integração
+extra mais frágil que o resto.
+
+**Idempotência**: antes de criar, procura um treino já existente pra
+aquela data (pelo nome, que inclui a data) via `get_workouts`/
+`get_scheduled_workouts`, e usa `update_workout` em vez de criar de novo
+se encontrar -- evita duplicar se a semana inteira for reprocessada
+(retry do workflow, execução manual repetida).
+
+**Fora de escopo por ora**: limpeza de treinos de semanas passadas
+(aceito acumular na biblioteca do Garmin Connect; resolve depois, como
+ajuste fino, se virar problema de uso real). Sincronização em si depende
+do relógio conectar via Bluetooth com o Garmin Connect Mobile (o
+Forerunner 165 não-Music não tem Wi-Fi embutido) -- o treino fica
+esperando no Garmin Connect até a próxima sincronização do relógio, não
+é instantâneo.
+
+**Formato exato do valor de alvo (pace/FC) ainda não determinado**: as
+funções helper da lib (`create_interval_step` etc.) só expõem o *tipo*
+de alvo (`target_type`, ex. `PACE_ZONE`/`HEART_RATE_ZONE`); o *valor*
+(a faixa de pace/FC em si) não tem parâmetro dedicado nos helpers --
+`ExecutableStep` aceita campos extras (`model_config = {"extra":
+"allow"}`), então prováveis candidatos são `targetValueOne`/
+`targetValueTwo`, mas a unidade exata (pace em m/s? FC em bpm ou número
+de zona 1-5?) precisa ser confirmada testando contra a API real antes de
+fechar a implementação -- não é uma decisão de design, é uma
+investigação técnica a fazer durante a implementação.
+
+**Critérios de aceite:**
+- [ ] Um dia de treino (não descanso) vira um treino agendado no Garmin Connect, na data certa, com o tipo de alvo certo (FC pra Rodagem/Recuperação/Longão/Fartlek, pace pros demais).
+- [ ] Dia de descanso não gera treino nenhum.
+- [ ] Falha simulada no upload não impede a escrita na planilha nem o envio do e-mail.
+- [ ] Rodar a mesma semana duas vezes atualiza o treino existente (mesmo `workoutId`), não cria um segundo.
+- [ ] Nome e descrição do treino no Garmin Connect batem com o tipo/data/motivo do dia.
+
+### Fase 13 — Ajuste fino
 Frequência de polling, prompt, extras — a definir com base no uso real.
 
 ## 8. Riscos e decisões (atualizado)
@@ -856,7 +920,7 @@ Decisões da sessão de 2026-08-17 (Fase 8), para referência futura:
   momento; mitigação é monitorar falhas (guardrail de `conectar()` abaixo)
   e reautenticar localmente quando acontecer, não uma solução preventiva
   mais robusta (ex. `actions/cache` auto-atualizável), que ficaria pra
-  Fase 12 (Ajuste fino) se o problema realmente aparecer na prática.
+  Fase 13 (Ajuste fino) se o problema realmente aparecer na prática.
 - **`conectar()` falha rápido em CI sem senha**: sem isso, um token
   expirado em produção faria o código cair no loop de `getpass()`/
   `input()` esperando senha/MFA -- num runner sem terminal, isso trava até
@@ -1098,3 +1162,52 @@ teria evitado o bug real observado.
   `MAX_TENTATIVAS_REVISAO` vezes, nunca chama `escrever_plano`, e levanta
   o erro esperado -- valida a lógica de controle sem depender de sorte
   numa chamada real ao Gemini.
+
+Decisões da sessão de grilling de 2026-09-15 (Fase 12), para referência
+futura:
+
+- **Descoberta que motivou a fase**: pesquisa (não pedido original do
+  usuário) revelou que a lib `garminconnect` já usada no projeto tem uma
+  API dedicada de treino estruturado (`RunningWorkout`,
+  `upload_running_workout`, `schedule_workout`) -- confirmado inspecionando
+  a biblioteca já instalada (versão 0.3.13), não só por busca na web.
+  Diferente de subir um `.fit` de atividade (que a Garmin não aceita como
+  treino estruturado, só como atividade já realizada). Confirmado também
+  que o Forerunner 165 do usuário suporta treino de intervalo estruturado
+  e planos vindos do Garmin Connect, mas sincroniza só por Bluetooth
+  (celular) ou USB -- a versão não-Music não tem Wi-Fi embutido, então o
+  treino fica esperando no Garmin Connect até a próxima sincronização do
+  relógio, não chega instantaneamente.
+- **Alvo pace-vs-FC por tipo de treino, não uma escolha única**: o Garmin
+  só aceita um tipo de alvo por passo. Decisão: treino de baixa
+  intensidade (Rodagem/Recuperação, Longão, Fartlek) usa FC como alvo,
+  porque o que importa ali é não passar do esforço seguro; treino de
+  intensidade (Ritmo, Limiar, Intervalado, Tiro) usa pace, porque o que
+  importa é acertar o ritmo de prova. Mesmo racional já aplicado noutras
+  partes do projeto (ex. guardrail de dor, seção 6.1) de tratar
+  intensidade e volume como coisas fisiologicamente distintas.
+- **Best-effort, não fail-fast**: diferente das Fases 9-10-11, uma falha
+  no envio ao relógio não aborta a semana -- decisão explícita do usuário
+  de não deixar a entrega central do projeto (planilha + e-mail) refém de
+  uma integração adicional sobre uma API já não-oficial (dobrando o
+  risco).
+- **Criação do treino só depois do plano aprovado, nunca por
+  tentativa**: resposta do usuário a uma pergunta sobre deduplicação --
+  entendida como regra de sequenciamento (só roda depois que o loop de
+  revisão da Fase 11 sai com um `plano` aprovado, nunca dentro do loop
+  por candidato) combinada com a checagem de duplicidade por nome+data já
+  proposta (verifica se já existe antes de criar, atualiza em vez de
+  duplicar) -- as duas regras resolvem ângulos diferentes do mesmo
+  problema (não criar treino de um candidato que seria descartado; não
+  duplicar se a semana inteira for reprocessada).
+- **Limpeza de treinos antigos fora de escopo por ora**: aceito acumular
+  na biblioteca do Garmin Connect -- mesmo padrão de "resolver quando (e
+  se) virar problema real" já usado pra outros riscos aceitos do projeto
+  (ex. rotação do refresh token da Garmin, seção 11, Fase 8).
+- **Formato exato do valor de alvo ainda não determinado**: as funções
+  helper da lib (`create_interval_step` etc.) só parametrizam o *tipo* de
+  alvo, não o *valor* da faixa de pace/FC -- campo extra
+  (`targetValueOne`/`targetValueTwo`, hipótese a confirmar) aceito pelo
+  Pydantic (`extra: allow`), mas a unidade exata não está documentada nos
+  helpers. Não é uma decisão de design pra grilling -- é investigação
+  técnica a fazer contra a API real durante a implementação.
