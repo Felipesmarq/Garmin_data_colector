@@ -29,13 +29,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Instalar uv
+        uses: astral-sh/setup-uv@v10.1.0
         with:
-          python-version: "3.12"
-          cache: "pip"
+          enable-cache: true
 
       - name: Instalar dependências
-        run: pip install -r requirements.txt
+        run: uv sync --frozen
 
       - name: Restaurar token da Garmin
         run: |
@@ -58,7 +58,7 @@ jobs:
           timeout_minutes: 10
           max_attempts: 3
           retry_wait_seconds: 60
-          command: python -m src.load.load_atividades
+          command: uv run python -m src.load.load_atividades
 
       - name: Carregar recuperação
         uses: nick-fields/retry@v3
@@ -66,7 +66,7 @@ jobs:
           timeout_minutes: 10
           max_attempts: 3
           retry_wait_seconds: 60
-          command: python -m src.load.load_recuperacao
+          command: uv run python -m src.load.load_recuperacao
 
       - name: Sincronizar dor (planilha)
         uses: nick-fields/retry@v3
@@ -74,7 +74,7 @@ jobs:
           timeout_minutes: 5
           max_attempts: 3
           retry_wait_seconds: 30
-          command: python -m src.load.load_dor
+          command: uv run python -m src.load.load_dor
 
       - name: Atualizar dashboard da planilha
         uses: nick-fields/retry@v3
@@ -82,4 +82,4 @@ jobs:
           timeout_minutes: 5
           max_attempts: 3
           retry_wait_seconds: 30
-          command: python -m src.load.planilha_desempenho
+          command: uv run python -m src.load.planilha_desempenho
