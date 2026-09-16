@@ -251,24 +251,28 @@ def _resolver_dia(
     duracao_planejada: float | None,
     pace_planejado_txt: str,
     fc_planejado_txt: str,
-    atividades: list[tuple],  # (tipo_treino, distancia_km, duracao_min, fc_media)
+    atividades: list[tuple],  # (activity_id, tipo_treino, distancia_km, duracao_min, fc_media)
 ) -> dict:
     """Compara o planejado do dia contra as atividades reais daquele dia
     (0, 1 ou mais). Mais de uma atividade: soma distância/duração; pace
     ponderado pela duração total; FC média ponderada pela duração de cada
-    atividade; tipo real é o da atividade de maior duração (a "principal"
-    do dia) -- ver critérios de aceite da Fase 9 no case do projeto."""
+    atividade; tipo real (e `activity_id_principal`, usado pra fundir o
+    veredito na linha da atividade real em vez de duplicar -- ver
+    resolver_dias_planejados) vêm da atividade de maior duração (a
+    "principal" do dia) -- ver critérios de aceite da Fase 9 no case do
+    projeto."""
     if not atividades:
         return {"status": STATUS_NAO_REALIZADO}
 
-    distancia_real = sum(a[1] or 0 for a in atividades) or None
-    duracao_real = sum(a[2] or 0 for a in atividades) or None
+    distancia_real = sum(a[2] or 0 for a in atividades) or None
+    duracao_real = sum(a[3] or 0 for a in atividades) or None
     pace_real = (duracao_real / distancia_real) if distancia_real and duracao_real else None
     fc_real = (
-        sum((a[3] or 0) * (a[2] or 0) for a in atividades) / duracao_real
+        sum((a[4] or 0) * (a[3] or 0) for a in atividades) / duracao_real
         if duracao_real else None
     )
-    tipo_real = max(atividades, key=lambda a: a[2] or 0)[0]
+    principal = max(atividades, key=lambda a: a[3] or 0)
+    activity_id_principal, tipo_real = principal[0], principal[1]
 
     aprovado = tipo_planejado is None or tipo_real == tipo_planejado
     if aprovado and distancia_planejada is not None and distancia_real is not None:
@@ -288,34 +292,57 @@ def _resolver_dia(
         "duracao_min": duracao_real,
         "pace_min_km": pace_real,
         "fc_media": fc_real,
+        "activity_id_principal": activity_id_principal,
     }
 
 
 def resolver_dias_planejados(con: psycopg.Connection, spreadsheet) -> list[tuple[date, str]]:
     """Resolve todo dia planejado (status PLANEJADO) na aba "Atividades" cuja
-    data já chegou, comparando contra `vw_sessoes` -- atualiza só as linhas
-    em questão via `batch_update` (um request só, mesmo que resolva vários
-    dias de uma vez), nunca reescreve a aba inteira. Devolve as datas
-    resolvidas nesta execução + status final, pro chamador decidir se manda
-    o lembrete diário (ver __main__)."""
+    data já **passou** (estritamente anterior a hoje -- hoje nunca é
+    resolvido, porque o treino ainda pode acontecer mais tarde nesse mesmo
+    dia), comparando contra `vw_sessoes`. Quando existe atividade real pro
+    dia, o veredito é **fundido na própria linha da atividade** (só as
+    colunas de plano, sem tocar nas colunas de atividade real que já
+    estavam lá) e a linha-placeholder (sem `activity_id`) é removida --
+    sem isso, o dia aparecia duas vezes na aba (a atividade real e o
+    placeholder resolvido lado a lado, mesmo dado repetido). Sem
+    atividade real (`NÃO_REALIZADO`), não há o que fundir -- só atualiza o
+    placeholder no lugar. Nunca reescreve a aba inteira. Devolve as datas
+    resolvidas nesta execução + status final, pro chamador decidir se
+    manda o lembrete diário (ver __main__)."""
     aba = obter_aba(spreadsheet, ABA_ATIVIDADES, CABECALHO_ATIVIDADES, cor=COR_ATIVIDADES)
     idx = {c: i for i, c in enumerate(CABECALHO_ATIVIDADES)}
     hoje = hoje_brt()
 
+    todas_linhas = aba.get_all_values()[1:]
+    linha_por_activity_id: dict[int, int] = {}
+    for num_linha, linha in enumerate(todas_linhas, start=2):
+        if len(linha) > idx["activity_id"] and linha[idx["activity_id"]]:
+            try:
+                linha_por_activity_id[int(linha[idx["activity_id"]])] = num_linha
+            except ValueError:
+                pass
+
     atualizacoes = []
+    linhas_pra_remover = []
     resolvidos = []
-    for num_linha, linha in enumerate(aba.get_all_values()[1:], start=2):
+    for num_linha, linha in enumerate(todas_linhas, start=2):
         if len(linha) <= idx["status"] or linha[idx["status"]] != STATUS_PLANEJADO:
             continue
         try:
             data_planejada = date.fromisoformat(linha[idx["data"]])
         except ValueError:
             continue
-        if data_planejada > hoje:
-            continue  # dia ainda não chegou, mantém PLANEJADO
+        if data_planejada >= hoje:
+            # dia de hoje ainda não terminou (o treino pode acontecer mais
+            # tarde) ou é dia futuro -- em ambos os casos, mantém PLANEJADO.
+            # Bug real corrigido em 2026-09-16: usar `>` em vez de `>=` aqui
+            # resolvia o dia de hoje mesmo antes de ele terminar, marcando
+            # NÃO_REALIZADO num treino que só ainda não tinha acontecido.
+            continue
 
         atividades = con.execute(
-            "SELECT tipo_treino, distancia_km, duracao_min, fc_media FROM vw_sessoes WHERE data = %s",
+            "SELECT activity_id, tipo_treino, distancia_km, duracao_min, fc_media FROM vw_sessoes WHERE data = %s",
             (data_planejada,),
         ).fetchall()
         resultado = _resolver_dia(
@@ -324,10 +351,27 @@ def resolver_dias_planejados(con: psycopg.Connection, spreadsheet) -> list[tuple
             float(linha[idx["duracao_planejada_min"]].replace(",", ".")) if linha[idx["duracao_planejada_min"]] else None,
             linha[idx["pace_planejado"]],
             linha[idx["fc_planejado"]],
-            [(a[0], float(a[1]) if a[1] is not None else None, float(a[2]) if a[2] is not None else None,
-              float(a[3]) if a[3] is not None else None) for a in atividades],
+            [(a[0], a[1], float(a[2]) if a[2] is not None else None, float(a[3]) if a[3] is not None else None,
+              float(a[4]) if a[4] is not None else None) for a in atividades],
         )
+        resolvidos.append((data_planejada, resultado["status"]))
 
+        linha_real = linha_por_activity_id.get(resultado.get("activity_id_principal"))
+        if resultado["status"] != STATUS_NAO_REALIZADO and linha_real is not None:
+            valores_plano = [linha[idx[c]] for c in COLUNAS_PLANO]
+            valores_plano[COLUNAS_PLANO.index("status")] = resultado["status"]
+            col_inicio = idx["status"] + 1  # 1-based
+            faixa = (
+                f"{gspread.utils.rowcol_to_a1(linha_real, col_inicio)}:"
+                f"{gspread.utils.rowcol_to_a1(linha_real, len(CABECALHO_ATIVIDADES))}"
+            )
+            atualizacoes.append({"range": faixa, "values": [valores_plano]})
+            linhas_pra_remover.append(num_linha)
+            continue
+
+        # NÃO_REALIZADO (sem atividade real pra fundir), ou fallback
+        # defensivo se a atividade principal não foi achada na aba por
+        # algum motivo -- atualiza o próprio placeholder no lugar.
         nova_linha = list(linha) + [""] * (len(CABECALHO_ATIVIDADES) - len(linha))
         nova_linha[idx["status"]] = resultado["status"]
         if resultado["status"] != STATUS_NAO_REALIZADO:
@@ -336,13 +380,15 @@ def resolver_dias_planejados(con: psycopg.Connection, spreadsheet) -> list[tuple
             nova_linha[idx["duracao_min"]] = _numero(resultado["duracao_min"], casas=1, remover_zero_a_direita=True)
             nova_linha[idx["pace_min_km"]] = _pace(resultado["pace_min_km"])
             nova_linha[idx["fc_media"]] = _numero(resultado["fc_media"], casas=0)
-
         faixa = f"A{num_linha}:{gspread.utils.rowcol_to_a1(num_linha, len(CABECALHO_ATIVIDADES))}"
         atualizacoes.append({"range": faixa, "values": [nova_linha]})
-        resolvidos.append((data_planejada, resultado["status"]))
 
     if atualizacoes:
         aba.batch_update(atualizacoes, value_input_option="USER_ENTERED")
+    # remove os placeholders fundidos só depois de todo write -- em ordem
+    # decrescente pra um delete não invalidar o índice do próximo.
+    for num_linha in sorted(linhas_pra_remover, reverse=True):
+        aba.delete_rows(num_linha)
     return resolvidos
 
 
