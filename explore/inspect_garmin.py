@@ -13,9 +13,9 @@ Objetivo deste script (não faz parte do pipeline final):
      desenhamos o schema.
 
 Uso:
-    pip install -r requirements.txt
+    uv sync
     cp .env.example .env   # preencha GARMIN_EMAIL e GARMIN_PASSWORD
-    python explore/inspect_garmin.py
+    uv run python explore/inspect_garmin.py
 
 Sobre login por tentativa e erro:
     Se você não lembra a senha exata, o script permite tentar de novo

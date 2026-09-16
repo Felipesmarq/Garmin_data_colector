@@ -145,8 +145,9 @@ dados.
 
 ### Fase 8 — automação (GitHub Actions)
 
-Dois workflows em `.github/workflows/`, sem Docker (roda com
-`actions/setup-python`, Python 3.12 direto no runner):
+Dois workflows em `.github/workflows/`, sem Docker (roda com `uv`
+-- `astral-sh/setup-uv`, instala Python 3.12 e as dependências a partir
+de `uv.lock` direto no runner):
 
 - **`sync_atividades.yml`** — todo dia, 21h BRT (`0 0 * * *` UTC): carrega
   atividades, recuperação, sincroniza dor e atualiza o dashboard da
@@ -226,7 +227,7 @@ enquanto -- não influencia a geração do plano seguinte.
 │   │   └── planilha_desempenho.py  # "Atividades" (upsert) + "Resumo Semanal" (snapshot) + verificação de aderência (Fase 9)
 │   └── analyze/analisar_com_ia.py  # plano semanal via Gemini + guardrails, aba "Plano da Semana"
 ├── Dockerfile · docker-compose.yml · .dockerignore  # só pra dev local, não usado em produção
-├── requirements.txt · .env.example · .gitignore
+├── pyproject.toml · uv.lock · .env.example · .gitignore
 └── docs/
     ├── index.md                 # página de documentação, com link pra tudo abaixo
     ├── CASE_DO_PROJETO_1.md     # case completo do projeto

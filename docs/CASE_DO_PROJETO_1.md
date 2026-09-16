@@ -111,7 +111,7 @@ garmin-ia-pipeline/
 │   │   └── planilha_desempenho.py  # Fase 6 -- abas "Atividades"/"Resumo Semanal", somente-leitura
 │   └── analyze/analisar_com_ia.py
 ├── explore/                    # scripts de investigação (não fazem parte do pipeline final)
-├── requirements.txt · .env.example · .gitignore · README.md
+├── pyproject.toml · uv.lock · .env.example · .gitignore · README.md
 ```
 
 Note: não existe mais pasta `data/` com banco versionado — o banco vive no
@@ -583,7 +583,8 @@ sucessivas com os mesmos dados de entrada.
 
 ### Fase 8 — Orquestração (GitHub Actions)
 **Requisitos:** dois workflows, sem Docker (`actions/setup-python`,
-Python 3.12 -- decisão tomada nesta fase, ver seção 11): `sync_atividades.yml`
+Python 3.12 -- decisão tomada nesta fase, ver seção 11; trocado por
+`astral-sh/setup-uv` numa sessão posterior, ver seção 11): `sync_atividades.yml`
 (diário, 21h BRT -- carrega atividades, recuperação, sincroniza dor via
 `load_dor.py` e atualiza o dashboard via `planilha_desempenho.py`, tudo
 no mesmo workflow) e `analise_semanal.yml` (domingo, 20h BRT -- resincroniza
@@ -785,7 +786,8 @@ Frequência de polling, prompt, extras — a definir com base no uso real.
 ## 8. Riscos e decisões (atualizado)
 
 - **Lib não-oficial do Garmin**: risco aceito, sem alternativa madura melhor
-  disponível. Mitigação: fixar versão no `requirements.txt`.
+  disponível. Mitigação: versão pinada no `uv.lock` (exata, não só um
+  mínimo como `requirements.txt` fazia antes -- ver seção 11).
 - **Sem webhook real**: polling agendado é a via principal e suficiente para
   "totalmente automático"; `repository_dispatch` via atalho no celular fica
   como gatilho manual opcional, não como requisito.
@@ -1123,9 +1125,10 @@ esse último especialmente exposto, porque o sync diário roda às 21h BRT
 horário agendado, não numa borda distante.
 
 **Correção:** novo módulo `src/tempo.py`, com `hoje_brt()` -- usa
-`zoneinfo.ZoneInfo("America/Sao_Paulo")` (pacote `tzdata` adicionado ao
-`requirements.txt` como rede de segurança, caso a imagem não tenha o
-banco de fusos do sistema) em vez de `date.today()`/`CURRENT_DATE` do
+`zoneinfo.ZoneInfo("America/Sao_Paulo")` (pacote `tzdata` como
+dependência, rede de segurança caso a imagem não tenha o banco de fusos
+do sistema; declarado no `pyproject.toml` desde a migração pra `uv`, ver
+seção 11) em vez de `date.today()`/`CURRENT_DATE` do
 Postgres (que reflete o fuso do servidor, também UTC). Todo lugar do
 pipeline que precisa saber "que dia é hoje" foi trocado pra usar
 `hoje_brt()`: `_proxima_semana`, `_observacoes_recentes` e a janela de
@@ -1297,3 +1300,46 @@ pra `tipo_real`), usado pra localizar a linha de destino do merge.
 - Rodar o resolvedor de novo depois do merge não repete nada (as linhas
   fundidas não têm mais status `PLANEJADO`, então não voltam a ser
   processadas).
+
+## Migração de pip pra uv (2026-09-16)
+
+**Motivação:** ajuste de eficiência pedido pelo usuário -- `pip install`
+nos workflows do GitHub Actions e no build do Docker era o passo mais
+lento do pipeline (build do Docker caiu de ~170s pra ~5s pra instalar as
+mesmas dependências).
+
+**O que mudou:**
+- `requirements.txt` (mínimos soltos, ex. `garminconnect>=0.3.6`)
+  substituído por `pyproject.toml` (mesmas dependências, declaradas em
+  `[project.dependencies]`) + `uv.lock` (versão exata de cada pacote e
+  sub-dependência, gerado por `uv lock`) -- reprodutibilidade real, não só
+  um mínimo que deixa a versão exata variar entre execuções.
+  `[tool.uv] package = false` porque o projeto é uma coleção de scripts
+  rodados via `python -m src.xxx`, não uma biblioteca instalável.
+- **Dockerfile**: copia o binário do `uv` (`ghcr.io/astral-sh/uv`, versão
+  pinada igual à instalada localmente) em vez de depender do `pip` já
+  presente na imagem base, e roda `uv sync --frozen` (falha se o
+  `uv.lock` estiver desalinhado do `pyproject.toml`, em vez de resolver
+  de novo silenciosamente). Ambiente criado em `/opt/venv`, **fora**
+  de `/app`, de propósito -- o `docker-compose.yml` faz bind-mount da
+  pasta inteira (`.:/app`) pra live-reload em dev; um venv criado dentro
+  de `/app` durante o build ficaria escondido pelo bind-mount do host em
+  runtime (o host não tem `.venv`, então `/app/.venv` simplesmente não
+  existiria dentro do container rodando). `ENV PATH="/opt/venv/bin:$PATH"`
+  mantém `python -m ...` funcionando sem mudar nenhum comando existente
+  no `docker-compose.yml` ou nos workflows.
+- **Workflows** (`sync_atividades.yml`, `analise_semanal.yml`):
+  `actions/setup-python` + `pip install -r requirements.txt` trocados por
+  `astral-sh/setup-uv` (com `enable-cache: true`) + `uv sync --frozen`.
+  Cada `command:` dos passos com `nick-fields/retry` ganhou o prefixo
+  `uv run` (ex. `uv run python -m src.load.load_atividades`) -- garante
+  que o venv sincronizado pelo `uv sync` é o que roda, sem depender de
+  `PATH`/ativação de venv persistir entre steps (cada step do GitHub
+  Actions é uma invocação de shell nova).
+
+**Validado:** build do Docker completo (imagem limpa) e execução real
+dentro do container com o bind-mount ativo -- `python` resolve pro
+`/opt/venv/bin/python` mesmo com o volume montado, todas as dependências
+importam, e `planilha_desempenho.py` rodou ponta a ponta contra o Neon e
+a planilha reais sem erro. Sintaxe dos dois workflows validada
+(`yaml.safe_load`).
