@@ -633,12 +633,18 @@ As linhas de dia planejado usam uma segunda operação de upsert, por
 `data` em vez de `activity_id` (não têm atividade real associada até
 acontecerem): `analisar_com_ia.py`, no domingo, insere os 7 dias da
 semana com status `PLANEJADO`. `planilha_desempenho.py` (job diário),
-além de inserir atividades novas por `activity_id` como sempre, também
-atualiza a linha de dia planejado correspondente à data (se existir) com
-o resultado -- `REALIZADO_DENTRO_DA_MARGEM`, `REALIZADO_FORA_DA_MARGEM`
-ou `NÃO_REALIZADO` (dia já passado sem atividade correspondente). Nenhuma
-das duas operações lê ou reescreve a aba inteira -- cada uma toca só a
-linha que precisa.
+além de inserir atividades novas por `activity_id` como sempre, resolve
+a linha de dia planejado correspondente à data **estritamente passada**
+(nunca hoje -- ver bug corrigido em 2026-09-16 nesta seção) com o
+resultado -- `REALIZADO_DENTRO_DA_MARGEM`, `REALIZADO_FORA_DA_MARGEM` ou
+`NÃO_REALIZADO`. Quando existe atividade real pro dia, o veredito é
+**fundido na própria linha da atividade** (só as colunas de plano são
+escritas; as colunas de atividade real já preenchidas por
+`escrever_atividades` não são tocadas) e a linha-placeholder é removida
+-- sem isso, o dia aparecia duas vezes na aba (achado também em produção,
+ver seção 11). Sem atividade real (`NÃO_REALIZADO`), não há o que
+fundir, e o placeholder é só atualizado no lugar. Nenhuma operação lê ou
+reescreve a aba inteira -- cada uma toca só as linhas que precisa.
 
 Lembrete diário: `sync_atividades.yml` (job diário já existente) passa a
 mandar um e-mail curto quando o dia anterior ficou `NÃO_REALIZADO` ou
@@ -647,9 +653,10 @@ Sem retroalimentação nesta fase: o resultado da verificação **não** entra
 no prompt da análise semanal nem vira guardrail -- é só informativo.
 
 **Critérios de aceite:**
-- [x] Um dia planejado sem atividade correspondente aparece como `NÃO_REALIZADO` na aba "Atividades" depois do sync diário. Testado em 2026-09-08 com data sintética (2020-01-01, sem atividade no Postgres).
+- [x] Um dia planejado sem atividade correspondente **e já passado** (estritamente anterior a hoje) aparece como `NÃO_REALIZADO` na aba "Atividades" depois do sync diário; o dia de **hoje** nunca é resolvido, mesmo sem atividade ainda, porque o treino pode acontecer mais tarde no mesmo dia. Testado em 2026-09-08 com data sintética (2020-01-01, sem atividade no Postgres) e em 2026-09-16 com uma linha de teste pra hoje (confirmado que fica intocada). Bug real corrigido em 2026-09-16 -- ver "Bug real de produção" no fim desta seção.
 - [x] Um dia com atividade dentro de todas as margens aparece como `REALIZADO_DENTRO_DA_MARGEM`; fora de qualquer margem, `REALIZADO_FORA_DA_MARGEM`. Testado com dado real (2026-08-15) e um plano propositalmente incompatível (2026-08-13).
 - [x] Duas atividades no mesmo dia são somadas antes da comparação, não tratadas como linhas separadas. Testado em 2026-08-13 (2 atividades reais no dia, agregadas numa linha só antes da comparação).
+- [x] Quando existe atividade real pro dia resolvido, o veredito funde na linha da atividade (não duplica a linha do dia). Bug real de duplicação corrigido em 2026-09-16 -- ver "Bug real de produção" no fim desta seção. Testado com 1 atividade (funde), 2 atividades (funde na de maior duração, a outra permanece intacta) e nenhuma atividade (sem fusão, placeholder atualizado no lugar).
 - [x] Rodar o job diário duas vezes seguidas não duplica linha nem perde as linhas de dia planejado escritas no domingo. Testado em 2026-09-08.
 - [x] E-mail diário de lembrete só chega quando há pelo menos um dia `NÃO_REALIZADO`/`REALIZADO_FORA_DA_MARGEM` no dia anterior -- mecanismo de envio testado (mesma função `enviar_email` do e-mail semanal, já validada); o gatilho por data (`ontem`) não foi validado em produção real ainda, só por inspeção de código.
 - [x] `escrever_atividades` não reescreve linhas de atividade já presentes na planilha -- só insere as novas (upsert por `activity_id`, sem sobrescrita total). Testado em 2026-09-08 contra o Neon e a planilha reais: migração automática do cabeçalho (15 atividades reescritas com a coluna nova, ordem mais-recente-primeiro preservada) e, na segunda execução, 0 atividades reinseridas.
@@ -1211,3 +1218,82 @@ futura:
   Pydantic (`extra: allow`), mas a unidade exata não está documentada nos
   helpers. Não é uma decisão de design pra grilling -- é investigação
   técnica a fazer contra a API real durante a implementação.
+
+## Bug real de produção: dia de hoje resolvido antes de terminar (2026-09-16)
+
+**Sintoma:** relatado pelo usuário -- um treino planejado pra 15/09,
+feito de fato no mesmo dia, já tinha sido marcado `NÃO_REALIZADO` antes
+mesmo de o dia terminar.
+
+**Causa raiz:** `resolver_dias_planejados` (Fase 9) só pulava dias
+**futuros** (`data_planejada > hoje`), mas resolvia o dia de **hoje**
+normalmente. Como o sync diário roda 1x por dia (21h BRT), qualquer
+treino planejado pra depois desse horário (comum -- treino à noite) era
+avaliado sem atividade correspondente ainda, e marcado `NÃO_REALIZADO`
+horas antes de o dia acabar. Diferente do bug de fuso da Fase 9/seção
+anterior (`date.today()` vs. `hoje_brt()`) -- este é um erro de limite na
+comparação (`>` em vez de `>=`), não de fuso horário; `hoje_brt()` já
+estava correto aqui.
+
+**Por que ajustar o horário do cron não resolveria de verdade:** não
+existe horário que garanta "a essa altura o treino já foi feito" -- o
+usuário pode treinar a qualquer hora da noite. A correção certa é nunca
+resolver o dia de hoje, só dias estritamente anteriores, independente de
+quando o sync roda.
+
+**Correção:** `data_planejada > hoje` -> `data_planejada >= hoje` --
+hoje sempre mantém `PLANEJADO`, só é resolvido no sync do dia seguinte,
+quando já é estritamente passado.
+
+**Validado:**
+- A linha real de 15/09 (marcada `NÃO_REALIZADO` incorretamente) foi
+  resetada pra `PLANEJADO` e reprocessada com o código corrigido -- como
+  15/09 já era passado (hoje 16/09) e a atividade real já estava
+  sincronizada (3,05km, 33,7min, FC 135, contra um alvo de 2km/23min),
+  resolveu corretamente como `REALIZADO_FORA_DA_MARGEM` (correu, mas
+  além da margem planejada -- não `NÃO_REALIZADO`).
+- Teste com uma linha sintética pra **hoje** (16/09), sem atividade
+  correspondente: confirmado que `resolver_dias_planejados` não a toca
+  (continua `PLANEJADO`).
+
+## Bug real de produção: dia resolvido duplicava a linha da atividade (2026-09-16)
+
+**Sintoma:** relatado pelo usuário, ao investigar o bug acima -- depois
+de resolvido, o dia de 15/09 aparecia **duas vezes** na aba "Atividades":
+uma linha da atividade real (`escrever_atividades`, upsert por
+`activity_id`) e uma segunda linha do placeholder resolvido (mesma data,
+mesmos números agregados, `activity_id` em branco). Dado repetido lado a
+lado, não uma linha só.
+
+**Causa raiz:** decisão original da Fase 9 (ver grilling de 2026-09-08)
+era deliberadamente misturar as duas granularidades -- linha por
+atividade real (histórico) e linha por dia planejado (aderência) --
+como duas coisas separadas que coexistem na mesma semana. Na prática,
+pra um dia com atividade real, isso duplicava visualmente a mesma
+informação (a mesma distância/duração/FC aparecendo nas duas linhas),
+o que o usuário não queria.
+
+**Correção:** quando existe atividade real pro dia, `resolver_dias_planejados`
+agora **funde o veredito na própria linha da atividade** -- escreve só as
+6 colunas de plano (`status`, `tipo_planejado`, etc.) na linha que já
+tem o `activity_id`, sem tocar nas colunas de atividade real, e remove a
+linha-placeholder (`delete_rows`, depois de todos os `batch_update` da
+execução, em ordem decrescente de índice pra não invalidar os próximos).
+Sem atividade real (`NÃO_REALIZADO`), não há linha de atividade pra
+fundir -- o placeholder continua sendo atualizado no próprio lugar, como
+antes. `_resolver_dia` passou a devolver também `activity_id_principal`
+(o `activity_id` da atividade de maior duração no dia, mesma escolhida
+pra `tipo_real`), usado pra localizar a linha de destino do merge.
+
+**Validado:**
+- Dia com 1 atividade (15/09, caso real do usuário): uma linha só depois
+  de resolvido, com dado real e colunas de plano juntos.
+- Dia sem nenhuma atividade (data sintética): continua uma linha só (o
+  placeholder), sem tentativa de fundir.
+- Dia com 2 atividades reais (13/08, caso real já existente no banco): o
+  veredito funde na atividade de maior duração; a outra atividade do
+  mesmo dia permanece como linha própria, sem colunas de plano --
+  nenhuma duplicação, nenhuma perda de dado.
+- Rodar o resolvedor de novo depois do merge não repete nada (as linhas
+  fundidas não têm mais status `PLANEJADO`, então não voltam a ser
+  processadas).
