@@ -84,7 +84,7 @@ TIPOS_DE_TREINO = """\
 
 
 class TreinoDia(BaseModel):
-    dia_semana: str  # "Segunda".."Domingo", só pra o modelo se situar -- a data real é atribuída em Python (_proxima_semana), nunca confiada ao LLM
+    dia_semana: str  # "Segunda".."Domingo", só pra o modelo se situar -- a data real é atribuída em Python (_semana_alvo), nunca confiada ao LLM
     descanso: bool
     tipo_treino: str | None = None  # da lista TIPOS_DE_TREINO, ou None se descanso
     distancia_km: float | None = None
@@ -120,9 +120,14 @@ class RevisaoCoerencia(BaseModel):
     problemas: list[str] = []
 
 
-def _proxima_semana() -> list[date]:
-    """Segunda a domingo da próxima semana ISO -- calculado em Python, não
+def _semana_alvo() -> list[date]:
+    """Segunda a domingo da semana a planejar -- calculado em Python, não
     pedido ao LLM (aritmética de data não é trabalho pra prompt).
+
+    Por padrão é a próxima semana ISO (o cron roda no domingo à noite). A
+    variável de ambiente SEMANA_PLANO=atual muda pra semana ISO corrente:
+    serve pra reexecução manual quando o cron falhou e a semana já começou
+    (ver workflow_dispatch em analise_semanal.yml).
 
     `hoje_brt()`, não `date.today()`: essa conta roda no domingo à noite,
     e um atraso de agendamento no cron (comum no GitHub Actions) pode
@@ -130,8 +135,11 @@ def _proxima_semana() -> list[date]:
     já seria segunda-feira ali, e a conta pularia a semana inteira (bug
     real, ver CASE_DO_PROJETO_1.md seção 11)."""
     hoje = hoje_brt()
-    proxima_segunda = hoje + timedelta(days=7 - hoje.weekday())
-    return [proxima_segunda + timedelta(days=i) for i in range(7)]
+    if os.environ.get("SEMANA_PLANO") == "atual":
+        segunda = hoje - timedelta(days=hoje.weekday())
+    else:
+        segunda = hoje + timedelta(days=7 - hoje.weekday())
+    return [segunda + timedelta(days=i) for i in range(7)]
 
 
 def _consultar(con: psycopg.Connection, sql: str, params: tuple = ()) -> tuple[list[str], list[tuple]]:
@@ -642,7 +650,7 @@ if __name__ == "__main__":
     con = conectar()
 
     # data em BRT, não CURRENT_DATE do Postgres (servidor roda em UTC) --
-    # mesmo cuidado de _proxima_semana, ver hoje_brt().
+    # mesmo cuidado de _semana_alvo, ver hoje_brt().
     corte_janela = hoje_brt() - timedelta(days=JANELA_SEMANAS * 7)
     colunas_ativ, linhas_ativ = _consultar(
         con,
@@ -665,7 +673,7 @@ if __name__ == "__main__":
     spreadsheet = conectar_planilha()
     observacoes = _observacoes_recentes(spreadsheet)
 
-    dias = _proxima_semana()
+    dias = _semana_alvo()
     prompt = _construir_prompt(
         _formatar_tabela(colunas_ativ, linhas_ativ),
         _formatar_tabela(colunas_resumo, linhas_resumo),
