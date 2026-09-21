@@ -11,7 +11,13 @@ name: Análise semanal
 on:
   schedule:
     - cron: "0 23 * * 0"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      semana:
+        description: "Semana a planejar (atual = reexecução quando o cron falhou e a semana já começou)"
+        type: choice
+        options: [proxima, atual]
+        default: proxima
 
 permissions:
   contents: read
@@ -39,6 +45,7 @@ jobs:
       EMAIL_REMETENTE: ${{ secrets.EMAIL_REMETENTE }}
       EMAIL_SENHA_APP: ${{ secrets.EMAIL_SENHA_APP }}
       EMAIL_DESTINATARIO: ${{ secrets.EMAIL_DESTINATARIO }}
+      SEMANA_PLANO: ${{ inputs.semana }}
     steps:
       # Job novo, VM nova -- reusable workflow não compartilha filesystem
       # entre jobs, então o ambiente (checkout, Python, token, credencial)
