@@ -131,31 +131,40 @@ def construir_treino(dia, data: date) -> RunningWorkout | None:
     )
 
 
-def _achar_workout_agendado(api: Garmin, data: date) -> int | None:
-    """workoutId de um treino NOSSO já agendado nessa data, ou None. "Nosso"
-    = nome no formato `<tipo> -- dd/mm` com o dd/mm da própria data: acha o
-    treino da data mesmo se o tipo mudou entre execuções (plano regerado),
-    sem depender do nome exato, e ignora treinos manuais do usuário."""
+def _achar_workout_agendado(api: Garmin, data: date) -> dict | None:
+    """Item do calendário de um treino NOSSO já agendado nessa data (tem
+    `id` do agendamento e `workoutId` do treino), ou None. "Nosso" = nome no
+    formato `<tipo> -- dd/mm` com o dd/mm da própria data: acha o treino da
+    data mesmo se o tipo mudou entre execuções (plano regerado), sem
+    depender do nome exato, e ignora treinos manuais do usuário."""
     calendario = api.get_scheduled_workouts(data.year, data.month)
     for item in calendario.get("calendarItems", []):
         if item.get("itemType") != "workout" or item.get("date") != data.isoformat():
             continue
         casou = _SUFIXO_NOME.search(item.get("title") or "")
         if casou and casou.group(1) == data.strftime("%d/%m"):
-            return item.get("workoutId")
+            return item
     return None
 
 
 def enviar_treino(api: Garmin, dia, data: date) -> str | None:
     """Cria (ou atualiza, se a data já tem treino nosso) e agenda o treino do
-    dia. Devolve "criado", "atualizado", ou None se o dia não gera treino."""
+    dia. Se o dia não gera mais treino (virou descanso num plano regerado) e
+    havia um nosso agendado, remove -- senão o treino velho ficaria no relógio.
+    Devolve "criado", "atualizado", "removido", ou None se não havia nada a
+    fazer."""
     treino = construir_treino(dia, data)
+    existente = _achar_workout_agendado(api, data)
+
     if treino is None:
+        if existente:
+            api.unschedule_workout(existente["id"])
+            api.delete_workout(existente["workoutId"])
+            return "removido"
         return None
 
-    existente = _achar_workout_agendado(api, data)
     if existente:
-        api.update_workout(existente, treino.to_dict())
+        api.update_workout(existente["workoutId"], treino.to_dict())
         return "atualizado"
 
     criado = api.upload_running_workout(treino)
@@ -176,6 +185,6 @@ def enviar_plano(api: Garmin, dias_do_plano: list[tuple[date, object]], hoje: da
             print(f"[Garmin: falha ao enviar o treino de {data}: {type(erro).__name__}: {erro}]")
             continue
         if resultado:
-            print(f"[Garmin: treino de {data} {resultado} ({dia.tipo_treino})]")
+            print(f"[Garmin: treino de {data} {resultado} ({dia.tipo_treino or 'Descanso'})]")
         elif not dia.descanso:
             print(f"[Garmin: treino de {data} ({dia.tipo_treino}) sem distância nem duração, não enviado]")
