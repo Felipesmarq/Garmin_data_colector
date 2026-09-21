@@ -18,6 +18,10 @@ on:
         type: choice
         options: [proxima, atual]
         default: proxima
+      forcar:
+        description: "Gerar um plano novo mesmo se a semana já tem plano (substitui planilha e treinos do relógio)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -46,6 +50,7 @@ jobs:
       EMAIL_SENHA_APP: ${{ secrets.EMAIL_SENHA_APP }}
       EMAIL_DESTINATARIO: ${{ secrets.EMAIL_DESTINATARIO }}
       SEMANA_PLANO: ${{ inputs.semana }}
+      FORCAR_REGERAR: ${{ inputs.forcar }}
     steps:
       # Job novo, VM nova -- reusable workflow não compartilha filesystem
       # entre jobs, então o ambiente (checkout, Python, token, credencial)
