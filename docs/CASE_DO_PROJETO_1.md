@@ -1352,9 +1352,21 @@ A "Análise semanal" de domingo 20/09 (21h BRT) falhou: o Gemini devolveu
 abort acontece antes de qualquer escrita, nada foi gravado nem enviado.
 Causa externa (indisponibilidade do provedor), não bug do pipeline. As 3
 tentativas cabem em menos de 3 minutos (30s de espera), então um pico de
-demanda mais longo derruba a rodada inteira. Melhorias possíveis, ainda
-não implementadas: espera crescente entre tentativas, backoff dentro de
-`gerar_analise`/`revisar_coerencia`, modelo de fallback.
+demanda mais longo derruba a rodada inteira.
+
+**Espera crescente (implementada):** o passo "Gerar análise semanal" de
+`analise_semanal.yml` deixou de usar `nick-fields/retry` (que só aceita
+espera fixa) e virou um laço de shell: 4 tentativas, com espera de 60s,
+180s e 420s entre elas (`timeout 300` por tentativa; a última não dorme
+depois de falhar). Feito no workflow e não no código Python de propósito:
+o script continua sem lógica de retry própria. O `sync_atividades.yml`
+não muda (não chama o Gemini). Trade-off: a tentativa reinicia o script
+inteiro, então um 503 na revisão refaz também a geração (2 chamadas em
+vez de 1). Ainda não feito: backoff por chamada dentro de
+`gerar_analise`/`revisar_coerencia` e modelo de fallback.
+Validado: a lógica do laço em bash (passa de primeira, passa após falhas,
+falha no fim com exit 1) e o YAML; o efeito real sobre a taxa de falha só
+se mede nas próximas rodadas agendadas.
 
 **Reexecução manual:** o disparo manual sempre planejaria a *próxima*
 semana (`_proxima_semana`), o que pularia a semana que o cron perdeu.
