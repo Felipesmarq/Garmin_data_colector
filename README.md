@@ -252,8 +252,10 @@ sintético, revisão de coerência aprovando plano real e reprovando plano
 sintético com violação disfarçada de guardrail). Também corrigido um bug
 real de fuso horário que fazia o plano semanal ser gerado pra semana
 errada quando o cron do GitHub Actions atrasava (ver seção 11 do case).
-Fase 12 (enviar o plano como treino estruturado pro relógio) desenhada em
-sessão de grilling, ainda não implementada. Falta: Fase 13 (ajuste fino).
+Fase 12 (enviar o plano como treino estruturado pro relógio) implementada e
+testada na conta real do Garmin Connect (criar, atualizar sem duplicar,
+falha isolada); falta a primeira rodada real no GitHub Actions e a chegada
+ao relógio. Falta: Fase 13 (ajuste fino).
 Roadmap completo e critérios de aceite por fase na seção 7 do
 [`docs/CASE_DO_PROJETO_1.md`](docs/CASE_DO_PROJETO_1.md).
 
