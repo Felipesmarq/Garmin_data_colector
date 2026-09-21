@@ -762,7 +762,8 @@ Forerunner 165 não-Music não tem Wi-Fi embutido) -- o treino fica
 esperando no Garmin Connect até a próxima sincronização do relógio, não
 é instantâneo.
 
-**Formato exato do valor de alvo (pace/FC) ainda não determinado**: as
+**Formato do valor de alvo (pace/FC) -- resolvido na implementação, ver
+seção 11 (2026-09-21)**. Hipótese original, mantida como registro: as
 funções helper da lib (`create_interval_step` etc.) só expõem o *tipo*
 de alvo (`target_type`, ex. `PACE_ZONE`/`HEART_RATE_ZONE`); o *valor*
 (a faixa de pace/FC em si) não tem parâmetro dedicado nos helpers --
@@ -774,11 +775,11 @@ fechar a implementação -- não é uma decisão de design, é uma
 investigação técnica a fazer durante a implementação.
 
 **Critérios de aceite:**
-- [ ] Um dia de treino (não descanso) vira um treino agendado no Garmin Connect, na data certa, com o tipo de alvo certo (FC pra Rodagem/Recuperação/Longão/Fartlek, pace pros demais).
-- [ ] Dia de descanso não gera treino nenhum.
-- [ ] Falha simulada no upload não impede a escrita na planilha nem o envio do e-mail.
-- [ ] Rodar a mesma semana duas vezes atualiza o treino existente (mesmo `workoutId`), não cria um segundo.
-- [ ] Nome e descrição do treino no Garmin Connect batem com o tipo/data/motivo do dia.
+- [x] Um dia de treino (não descanso) vira um treino agendado no Garmin Connect, na data certa, com o tipo de alvo certo (FC pra Rodagem/Recuperação/Longão/Fartlek, pace pros demais). Testado na conta real em 2026-09-21 (agendado em 31/10, fora do plano real, e removido depois).
+- [x] Dia de descanso não gera treino nenhum. `construir_treino` devolve `None`; testado offline com `TreinoDia` real.
+- [x] Falha simulada no upload não impede a escrita na planilha nem o envio do e-mail. Testado com API falsa (quebrada por inteiro e quebrada só num dia): `enviar_plano` nunca levanta, os outros dias seguem; e o bloco em `__main__` roda depois da planilha e do e-mail.
+- [x] Rodar a mesma semana duas vezes atualiza o treino existente (mesmo `workoutId`), não cria um segundo. Testado na conta real: 3 chamadas seguidas (criar, repetir, trocar o tipo) deixaram 1 treino na biblioteca e 1 no calendário, mesmo `workoutId`.
+- [x] Nome e descrição do treino no Garmin Connect batem com o tipo/data/motivo do dia. Lidos de volta via `get_workout_by_id`.
 
 ### Fase 13 — Ajuste fino
 Frequência de polling, prompt, extras — a definir com base no uso real.
@@ -1221,6 +1222,52 @@ futura:
   Pydantic (`extra: allow`), mas a unidade exata não está documentada nos
   helpers. Não é uma decisão de design pra grilling -- é investigação
   técnica a fazer contra a API real durante a implementação.
+
+## Implementação da Fase 12 (2026-09-21)
+
+- **Formato do alvo, confirmado na API real (não só pelo eco do JSON)**:
+  subiu-se um treino descartável com um passo de FC e um de pace, leu-se de
+  volta e baixou-se o `.fit` que a própria Garmin gera do treino. FC:
+  `targetValueOne/Two` = bpm absolutos (o FIT mostra 230/240 pra 130/140,
+  é o offset +100 do formato). Pace: `targetValueOne/Two` = **velocidade em
+  m/s**, com `One` o limite lento e `Two` o rápido (o FIT mostra
+  2.778-3.03 m/s pra 6:00-5:30 min/km). Não é pace em min/km. Conversão em
+  `_alvo_pace`: `1000 / (pace_min_km * 60)`.
+- **Chave de idempotência é a data, não o nome exato**: o design dizia
+  "procura pelo nome (que inclui a data)". Como o LLM pode regerar o plano
+  com um tipo diferente pra mesma data, buscar pelo nome exato criaria um
+  segundo treino no mesmo dia. `_achar_workout_agendado` procura no
+  calendário (`get_scheduled_workouts`) um item de treino naquela data cujo
+  título termine em ` -- dd/mm` da própria data, e faz `update_workout` nele.
+  O sufixo também impede mexer em treino manual do usuário. Testado
+  trocando Rodagem por Limiar na mesma data: mesmo `workoutId`, título e
+  passos atualizados, agendamento preservado.
+- **Aquecimento e desaquecimento só nos treinos com alvo de pace**
+  (10 min e 5 min, sem alvo): nos de baixa intensidade (alvo de FC) o treino
+  inteiro já é leve, então o passo principal é o treino todo. Decisão de
+  implementação, não do grilling: o requisito dizia só "aquecimento
+  opcional". Os minutos vão somados à `distancia_km`/`duracao_min` do plano.
+- **Só envia datas de hoje em diante**: agendar no passado não faz sentido
+  (o relógio nunca executaria). Corrige, pro relógio, o caveat de rodar
+  `SEMANA_PLANO=atual` no meio da semana.
+- **Sem estrutura de repetição**: o plano só tem distância/duração total por
+  dia, então Intervalado e Tiro viram um passo principal contínuo com alvo de
+  pace, não "N x tiros com recuperação". Evoluir isso exigiria o LLM devolver
+  a estrutura das repetições (mudança de schema do plano).
+- **Ordem no `__main__`**: depois de `escrever_plano`,
+  `escrever_dias_planejados` e `enviar_email_resumo`. A entrega central não
+  espera nem depende do Garmin.
+- **Dia de treino sem distância nem duração** (o LLM omitiu os dois) não é
+  enviado, e o log avisa. Sem faixa de FC/pace parseável, o passo sai com
+  `NO_TARGET` em vez de ser descartado.
+- **Módulo**: `src/load/treino_garmin.py`, com `TreinoDia` por duck typing pra
+  não criar dependência circular com `analisar_com_ia.py`.
+
+**Ainda não exercitado:** rodada real no GitHub Actions e a chegada efetiva
+do treino ao relógio (depende da sincronização Bluetooth do Forerunner 165).
+Registro também que reprocessar uma semana já escrita regera o plano via LLM:
+a planilha mantém o plano original (idempotente) mas o e-mail e o relógio
+recebem o novo. Vale desde antes da Fase 12 (já era assim com o e-mail).
 
 ## Bug real de produção: dia de hoje resolvido antes de terminar (2026-09-16)
 
