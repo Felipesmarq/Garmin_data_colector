@@ -73,10 +73,20 @@ jobs:
         env:
           GOOGLE_SHEETS_CREDENTIALS_JSON: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS_JSON }}
 
+      # Espera crescente (1, 3 e 7 min) em vez do retry de espera fixa: o 503
+      # do Gemini ("high demand") dura mais que os 30s que o nick-fields/retry
+      # dava entre tentativas (ver docs/CASE_DO_PROJETO_1.md, 2026-09-21).
+      # 4 tentativas no total; a última (espera 0) não dorme depois de falhar.
       - name: Gerar análise semanal
-        uses: nick-fields/retry@v3
-        with:
-          timeout_minutes: 5
-          max_attempts: 3
-          retry_wait_seconds: 30
-          command: uv run python -m src.analyze.analisar_com_ia
+        run: |
+          for espera in 60 180 420 0; do
+            if timeout 300 uv run python -m src.analyze.analisar_com_ia; then
+              exit 0
+            fi
+            if [ "$espera" -gt 0 ]; then
+              echo "::warning::Tentativa falhou, nova tentativa em ${espera}s"
+              sleep "$espera"
+            fi
+          done
+          echo "::error::Análise semanal falhou em todas as tentativas"
+          exit 1
