@@ -36,6 +36,8 @@ from pydantic import BaseModel
 
 from src.db import conectar
 from src.email_util import enviar_email
+from src.extract.garmin import conectar as conectar_garmin
+from src.load.treino_garmin import enviar_plano as enviar_plano_garmin
 from src.tempo import hoje_brt
 from src.load.planilha_desempenho import (
     ABA_ATIVIDADES,
@@ -717,5 +719,13 @@ if __name__ == "__main__":
 
     enviar_email_resumo(plano, dias)
     print("[e-mail com o plano da semana enviado]")
+
+    # Fase 12 -- só depois do plano aprovado (nunca por candidato) e da
+    # entrega central (planilha + e-mail). Best-effort: a integração com o
+    # Garmin é mais frágil que o resto, então nada aqui aborta a execução.
+    try:
+        enviar_plano_garmin(conectar_garmin(), list(zip(dias, plano.dias)), hoje_brt())
+    except Exception as erro:  # noqa: BLE001 -- best-effort de propósito
+        print(f"[Garmin: não foi possível enviar os treinos ao relógio: {type(erro).__name__}: {erro}]")
 
     con.close()
