@@ -1343,3 +1343,31 @@ dentro do container com o bind-mount ativo -- `python` resolve pro
 importam, e `planilha_desempenho.py` rodou ponta a ponta contra o Neon e
 a planilha reais sem erro. Sintaxe dos dois workflows validada
 (`yaml.safe_load`).
+
+## Falha do Gemini (503) e reexecução da semana atual (2026-09-21)
+
+A "Análise semanal" de domingo 20/09 (21h BRT) falhou: o Gemini devolveu
+`503 UNAVAILABLE` ("high demand") nas 3 tentativas do `nick-fields/retry`
+(tentativa 1 e 3 em `revisar_coerencia`, a 2 em `gerar_analise`). Como o
+abort acontece antes de qualquer escrita, nada foi gravado nem enviado.
+Causa externa (indisponibilidade do provedor), não bug do pipeline. As 3
+tentativas cabem em menos de 3 minutos (30s de espera), então um pico de
+demanda mais longo derruba a rodada inteira. Melhorias possíveis, ainda
+não implementadas: espera crescente entre tentativas, backoff dentro de
+`gerar_analise`/`revisar_coerencia`, modelo de fallback.
+
+**Reexecução manual:** o disparo manual sempre planejaria a *próxima*
+semana (`_proxima_semana`), o que pularia a semana que o cron perdeu.
+`_proxima_semana` virou `_semana_alvo`: com `SEMANA_PLANO=atual` calcula a
+semana ISO corrente; sem a variável, o comportamento é o de antes. O
+`workflow_dispatch` de `analise_semanal.yml` ganhou o input `semana`
+(`proxima` | `atual`, padrão `proxima`) que alimenta essa variável, então
+o cron de domingo não muda.
+
+**Validado:** `_semana_alvo` com hoje = 21/09: vazio/`proxima` dá 28/09 a
+04/10, `atual` dá 21/09 a 27/09. Rodada real (`semana=atual`) concluiu com
+sucesso na tentativa 2 (a 1 pegou 503 de novo, o retry absorveu): 7 linhas
+na aba "Plano da Semana" e 3 dias `PLANEJADO` na aba "Atividades".
+
+Caveat: rodar `atual` no meio da semana cria linhas `PLANEJADO` também
+para dias que já passaram; o próximo sync os marca `NÃO_REALIZADO`.
