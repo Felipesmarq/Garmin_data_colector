@@ -539,16 +539,23 @@ def _linhas_plano(plano: PlanoSemanal, dias: list[date]) -> list[tuple]:
     ]
 
 
+def plano_ja_escrito(spreadsheet, dias: list[date]) -> bool:
+    """A semana já tem plano na aba "Plano da Semana"? Critério: a
+    segunda-feira dela está na coluna `data` (o plano sempre escreve os 7
+    dias, inclusive descanso, então a segunda sempre existe)."""
+    aba = obter_aba(spreadsheet, ABA_PLANO, CABECALHO_PLANO, cor=COR_PLANO)
+    idx_data = CABECALHO_PLANO.index("data") + 1  # col_values é 1-based
+    return str(dias[0]) in set(aba.col_values(idx_data)[1:])
+
+
 def escrever_plano(spreadsheet, plano: PlanoSemanal, dias: list[date]) -> int:
     """Append-only: cada semana é um registro histórico, não um estado
     atual pra espelhar -- diferente de planilha_desempenho.py (dashboard),
-    aqui NÃO se usa sobrescrever(). Idempotente: se a segunda-feira dessa
-    semana já está na coluna `data`, não insere de novo."""
-    aba = obter_aba(spreadsheet, ABA_PLANO, CABECALHO_PLANO, cor=COR_PLANO)
-    idx_data = CABECALHO_PLANO.index("data") + 1  # col_values é 1-based
-    datas_existentes = set(aba.col_values(idx_data)[1:])
-    if str(dias[0]) in datas_existentes:
+    aqui NÃO se usa sobrescrever(). Idempotente: se a semana já tem plano
+    (ver plano_ja_escrito), não insere de novo."""
+    if plano_ja_escrito(spreadsheet, dias):
         return 0
+    aba = obter_aba(spreadsheet, ABA_PLANO, CABECALHO_PLANO, cor=COR_PLANO)
     linhas = _linhas_plano(plano, dias)
     inserir_linhas(aba, [["" if v is None else v for v in linha] for linha in linhas])
     return len(linhas)
@@ -649,6 +656,21 @@ def enviar_email_resumo(plano: PlanoSemanal, dias: list[date]) -> None:
 
 
 if __name__ == "__main__":
+    # Idempotência ponta a ponta: semana que já tem plano na planilha não é
+    # regerada. Reprocessar (retry manual, cron + disparo manual) chamaria o
+    # Gemini de novo e o LLM devolve OUTRO plano -- a planilha (idempotente)
+    # ficaria com o primeiro enquanto e-mail e relógio receberiam o segundo.
+    # Checa antes de tocar no banco ou no Gemini, pra não gastar nada.
+    # Pra forçar a regeração, apague as linhas da semana em "Plano da Semana".
+    spreadsheet = conectar_planilha()
+    dias = _semana_alvo()
+    if plano_ja_escrito(spreadsheet, dias):
+        print(
+            f"[plano da semana de {dias[0]} já existe em '{ABA_PLANO}': nada a gerar, "
+            "nenhum e-mail nem treino novo enviado]"
+        )
+        raise SystemExit(0)
+
     con = conectar()
 
     # data em BRT, não CURRENT_DATE do Postgres (servidor roda em UTC) --
@@ -672,10 +694,8 @@ if __name__ == "__main__":
     if instrucoes:
         print(f"[guardrail(s) ativado(s) -- ACWR atual: {acwr_atual}, dor recente: {dor_recente}]\n")
 
-    spreadsheet = conectar_planilha()
     observacoes = _observacoes_recentes(spreadsheet)
 
-    dias = _semana_alvo()
     prompt = _construir_prompt(
         _formatar_tabela(colunas_ativ, linhas_ativ),
         _formatar_tabela(colunas_resumo, linhas_resumo),
