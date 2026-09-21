@@ -570,7 +570,41 @@ def _numero_planilha(v, casas: int) -> str:
     return f"{float(v):.{casas}f}".rstrip("0").rstrip(".").replace(".", ",")
 
 
-def escrever_dias_planejados(spreadsheet, plano: PlanoSemanal, dias: list[date]) -> int:
+def apagar_plano_da_semana(spreadsheet, dias: list[date]) -> tuple[int, int]:
+    """Regeração forçada -- apaga o plano antigo da semana: as linhas da aba
+    "Plano da Semana" e as linhas PLANEJADO de "Atividades". Linhas já
+    resolvidas (REALIZADO_*/NÃO_REALIZADO) e atividades reais não são
+    tocadas: são histórico, não plano. Só deve rodar DEPOIS de o plano novo
+    ser aprovado -- se a geração falhar, o plano atual continua intacto.
+    Devolve (linhas apagadas do plano, linhas PLANEJADO apagadas)."""
+    datas_semana = {str(d) for d in dias}
+
+    aba_plano = obter_aba(spreadsheet, ABA_PLANO, CABECALHO_PLANO, cor=COR_PLANO)
+    idx_data_plano = CABECALHO_PLANO.index("data")
+    linhas_plano = [
+        i + 1
+        for i, linha in enumerate(aba_plano.get_all_values())
+        if i > 0 and len(linha) > idx_data_plano and linha[idx_data_plano] in datas_semana
+    ]
+
+    aba_ativ = obter_aba(spreadsheet, ABA_ATIVIDADES, CABECALHO_ATIVIDADES, cor=COR_ATIVIDADES)
+    idx_data = CABECALHO_ATIVIDADES.index("data")
+    idx_status = CABECALHO_ATIVIDADES.index("status")
+    linhas_ativ = [
+        i + 1
+        for i, linha in enumerate(aba_ativ.get_all_values())
+        if i > 0 and len(linha) > idx_status and linha[idx_data] in datas_semana and linha[idx_status] == STATUS_PLANEJADO
+    ]
+
+    # de baixo pra cima, senão o índice das linhas seguintes muda a cada delete
+    for r in sorted(linhas_plano, reverse=True):
+        aba_plano.delete_rows(r)
+    for r in sorted(linhas_ativ, reverse=True):
+        aba_ativ.delete_rows(r)
+    return len(linhas_plano), len(linhas_ativ)
+
+
+def escrever_dias_planejados(spreadsheet, plano: PlanoSemanal, dias: list[date], forcar: bool = False) -> int:
     """Fase 9 -- grava um placeholder (status PLANEJADO) por dia de treino
     (não descanso) na aba "Atividades", pro job diário resolver depois
     contra a atividade real (ver planilha_desempenho.resolver_dias_planejados).
@@ -580,16 +614,22 @@ def escrever_dias_planejados(spreadsheet, plano: PlanoSemanal, dias: list[date])
     qualquer dia da semana, não só a segunda-feira (diferente de
     escrever_plano) -- segunda pode ser dia de descanso, que nunca ganha
     linha própria, então checar só ela nunca encontraria a semana já
-    escrita e duplicaria a cada execução."""
+    escrita e duplicaria a cada execução.
+
+    `forcar=True` (regeração forçada, ver apagar_plano_da_semana): não trata
+    linha com status como "semana já escrita" -- só sobraram as já resolvidas
+    (as PLANEJADO foram apagadas), e essas datas já têm desfecho, então não
+    ganham placeholder novo; as demais ganham."""
     aba = obter_aba(spreadsheet, ABA_ATIVIDADES, CABECALHO_ATIVIDADES, cor=COR_ATIVIDADES)
     idx_data = CABECALHO_ATIVIDADES.index("data")
     idx_status = CABECALHO_ATIVIDADES.index("status")
     datas_semana = {str(d) for d in dias}
-    ja_planejada = any(
-        len(linha) > idx_status and linha[idx_data] in datas_semana and linha[idx_status]
+    datas_com_status = {
+        linha[idx_data]
         for linha in aba.get_all_values()[1:]
-    )
-    if ja_planejada:
+        if len(linha) > idx_status and linha[idx_data] in datas_semana and linha[idx_status]
+    }
+    if datas_com_status and not forcar:
         return 0
 
     em_branco_real = [""] * len(COLUNAS_REAIS)
@@ -599,7 +639,7 @@ def escrever_dias_planejados(spreadsheet, plano: PlanoSemanal, dias: list[date])
     # escrever_atividades) -- dias já vem em ordem Segunda->Domingo, então
     # percorre de trás pra frente antes de inserir no topo.
     for treino, data in reversed(list(zip(plano.dias, dias))):
-        if treino.descanso:
+        if treino.descanso or str(data) in datas_com_status:
             continue
         linha_real = list(em_branco_real)
         linha_real[idx_data_real] = str(data)
@@ -661,15 +701,20 @@ if __name__ == "__main__":
     # Gemini de novo e o LLM devolve OUTRO plano -- a planilha (idempotente)
     # ficaria com o primeiro enquanto e-mail e relógio receberiam o segundo.
     # Checa antes de tocar no banco ou no Gemini, pra não gastar nada.
-    # Pra forçar a regeração, apague as linhas da semana em "Plano da Semana".
+    # FORCAR_REGERAR=true (input `forcar` do disparo manual) gera um plano
+    # novo mesmo assim e substitui o antigo -- mas só depois de o novo ser
+    # aprovado pela revisão, então uma falha na geração não apaga nada.
     spreadsheet = conectar_planilha()
     dias = _semana_alvo()
+    forcar = os.environ.get("FORCAR_REGERAR") == "true"
     if plano_ja_escrito(spreadsheet, dias):
-        print(
-            f"[plano da semana de {dias[0]} já existe em '{ABA_PLANO}': nada a gerar, "
-            "nenhum e-mail nem treino novo enviado]"
-        )
-        raise SystemExit(0)
+        if not forcar:
+            print(
+                f"[plano da semana de {dias[0]} já existe em '{ABA_PLANO}': nada a gerar, "
+                "nenhum e-mail nem treino novo enviado]"
+            )
+            raise SystemExit(0)
+        print(f"[regeração forçada: o plano de {dias[0]} em '{ABA_PLANO}' será substituído se o novo for aprovado]")
 
     con = conectar()
 
@@ -725,13 +770,20 @@ if __name__ == "__main__":
 
     _imprimir_plano(plano, dias)
 
+    if forcar:
+        apagadas_plano, apagadas_ativ = apagar_plano_da_semana(spreadsheet, dias)
+        print(
+            f"[plano antigo apagado: {apagadas_plano} linha(s) em '{ABA_PLANO}', "
+            f"{apagadas_ativ} linha(s) {STATUS_PLANEJADO} em '{ABA_ATIVIDADES}']"
+        )
+
     n = escrever_plano(spreadsheet, plano, dias)
     if n:
         print(f"\n[{n} linha(s) escrita(s) na aba '{ABA_PLANO}']")
     else:
         print(f"\n[plano da semana de {dias[0]} já estava na aba '{ABA_PLANO}', não duplicado]")
 
-    n_plan = escrever_dias_planejados(spreadsheet, plano, dias)
+    n_plan = escrever_dias_planejados(spreadsheet, plano, dias, forcar=forcar)
     if n_plan:
         print(f"[{n_plan} dia(s) planejado(s) escrito(s) na aba '{ABA_ATIVIDADES}', status {STATUS_PLANEJADO}]")
     else:
