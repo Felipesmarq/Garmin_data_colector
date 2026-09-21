@@ -1263,11 +1263,52 @@ futura:
 - **Módulo**: `src/load/treino_garmin.py`, com `TreinoDia` por duck typing pra
   não criar dependência circular com `analisar_com_ia.py`.
 
-**Ainda não exercitado:** rodada real no GitHub Actions e a chegada efetiva
-do treino ao relógio (depende da sincronização Bluetooth do Forerunner 165).
-Registro também que reprocessar uma semana já escrita regera o plano via LLM:
-a planilha mantém o plano original (idempotente) mas o e-mail e o relógio
-recebem o novo. Vale desde antes da Fase 12 (já era assim com o e-mail).
+**Rodada real no GitHub Actions (2026-09-21):** `workflow_dispatch` com
+`semana=atual` concluiu na primeira tentativa: e-mail enviado e 2 treinos
+criados no Garmin Connect (22/09 e 24/09, alvo de FC 120-135 bpm), conferidos
+depois lendo o calendário e cada treino pela API. Ainda não confirmado: a
+chegada efetiva ao relógio (depende da sincronização Bluetooth do Forerunner
+165).
+
+### Divergência planilha x relógio e a correção estrutural (2026-09-21)
+
+**O que aconteceu:** reprocessar uma semana já escrita regerava o plano no
+Gemini, e o LLM devolve outro plano. `escrever_plano` e
+`escrever_dias_planejados` são idempotentes (mantêm o primeiro), mas o e-mail
+e agora o relógio recebiam o segundo. Na prática: a rodada das 10h42 escreveu
+na planilha seg/qua/sex (3 km, 2 km, 3,5 km) e a rodada seguinte mandou
+ter/qui (2,2 km, 2,5 km) pro e-mail e pro Garmin. Como a Fase 9 compara os
+treinos reais com o plano da **planilha**, seguir o do relógio geraria
+`NÃO_REALIZADO` nos dias errados. O problema já existia com o e-mail; a
+Fase 12 o tornou caro.
+
+**Correção dos dados (decisão do usuário: o plano novo é o oficial):** as 7
+linhas da semana em "Plano da Semana" foram atualizadas no lugar, e as 3
+linhas `PLANEJADO` antigas em "Atividades" foram apagadas e substituídas
+pelas 2 do plano novo, reconstruído a partir do log do run (não havia cópia
+estruturada). Antes de alterar, o script validou o estado (exatamente 7 e 3
+linhas, nenhuma linha real da semana envolvida) e salvou um backup das abas.
+Conferido lendo de volta: vírgula decimal e ordem do mais recente primeiro
+preservadas.
+
+**Correção estrutural:** `plano_ja_escrito` (a segunda-feira da semana já
+está em "Plano da Semana") é checada no início do `__main__`, antes de
+conectar no Neon e de chamar o Gemini. Se a semana já tem plano, sai com
+código 0 sem gerar, sem e-mail e sem tocar no Garmin. A checagem em
+`escrever_plano` passou a usar a mesma função.
+**Validado no dado real e no Actions:** com `SEMANA_PLANO=atual` o script sai
+cedo; com a próxima semana (sem plano) a checagem dá `False`, ou seja, segue
+gerando. Rodada real do workflow depois da correção: job `analisar` em 12s
+(contra 1m15 gerando), log só com "nada a gerar", calendário do Garmin com os
+mesmos 2 treinos e os mesmos `workoutId`.
+
+**Limitação assumida:** como a semana com plano nunca é reprocessada, se o
+envio ao Garmin falhar (best-effort) ele não é retentado numa nova execução:
+a planilha já tem o plano, e ela não guarda o suficiente pra remontar os
+treinos. Pra reenviar, é preciso apagar as linhas da semana em "Plano da
+Semana" e regerar (o plano muda), ou o envio ganha uma via própria a partir
+do plano salvo. Aceito por ora: o cron semanal roda uma vez e o log avisa da
+falha.
 
 ## Bug real de produção: dia de hoje resolvido antes de terminar (2026-09-16)
 
