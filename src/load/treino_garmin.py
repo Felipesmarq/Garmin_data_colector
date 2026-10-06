@@ -36,7 +36,13 @@ from src.load.planilha_desempenho import _parse_faixa_fc, _parse_faixa_pace
 # seguro); o resto -> alvo de pace (acertar o ritmo de prova). O Garmin só
 # aceita um tipo de alvo por passo. Comparação por prefixo do nome em
 # minúsculas, porque o LLM devolve o tipo como texto ("Rodagem/Recuperação").
-TIPOS_ALVO_FC = ("rodagem", "recuperação", "longão", "fartlek")
+TIPOS_ALVO_FC = ("longão", "fartlek")
+
+# Rodagem/Recuperação: só a distância é a meta, sem alvo de FC nem de pace.
+# Com alvo de FC, o relógio empurrava o corredor a acelerar quando a FC ficava
+# abaixo da faixa, o contrário do objetivo de um treino de recuperação
+# (observado no uso real, 2026-10-06).
+TIPOS_SEM_ALVO = ("rodagem", "recuperação")
 
 # Aquecimento/desaquecimento sem alvo só nos treinos de intensidade (alvo de
 # pace) -- nos de baixa intensidade o treino inteiro já é leve.
@@ -51,6 +57,10 @@ _SUFIXO_NOME = re.compile(r" -- (\d{2}/\d{2})$")
 
 def _usa_alvo_fc(tipo: str | None) -> bool:
     return (tipo or "").strip().lower().startswith(TIPOS_ALVO_FC)
+
+
+def _sem_alvo(tipo: str | None) -> bool:
+    return (tipo or "").strip().lower().startswith(TIPOS_SEM_ALVO)
 
 
 def _nome_treino(tipo: str, data: date) -> str:
@@ -94,13 +104,18 @@ def construir_treino(dia, data: date) -> RunningWorkout | None:
     if not dia.distancia_km and not dia.duracao_min:
         return None
 
+    sem_alvo = _sem_alvo(dia.tipo_treino)
     por_fc = _usa_alvo_fc(dia.tipo_treino)
-    alvo = _alvo_fc(dia.fc_alvo) if por_fc else _alvo_pace(dia.pace_alvo)
+    if sem_alvo:
+        alvo = None
+    else:
+        alvo = _alvo_fc(dia.fc_alvo) if por_fc else _alvo_pace(dia.pace_alvo)
     tipo_alvo, valores = alvo if alvo else (None, {})
+    leve = sem_alvo or por_fc  # treino de baixa intensidade: sem aquecimento/desaquecimento
 
     passos = []
     ordem = 1
-    if not por_fc:
+    if not leve:
         passos.append(create_warmup_step(AQUECIMENTO_SEG, ordem))
         ordem += 1
 
@@ -113,10 +128,10 @@ def construir_treino(dia, data: date) -> RunningWorkout | None:
     passos.append(principal)
     ordem += 1
 
-    if not por_fc:
+    if not leve:
         passos.append(create_cooldown_step(DESAQUECIMENTO_SEG, ordem))
 
-    extra = 0 if por_fc else AQUECIMENTO_SEG + DESAQUECIMENTO_SEG
+    extra = 0 if leve else AQUECIMENTO_SEG + DESAQUECIMENTO_SEG
     return RunningWorkout(
         workoutName=_nome_treino(dia.tipo_treino, data),
         description=dia.motivo,
