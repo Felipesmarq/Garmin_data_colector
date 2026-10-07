@@ -6,13 +6,127 @@ cuidado pra não repetir o padrão de sobrecarga que já causou canelite uma
 vez. Documentação completa (contexto, arquitetura, roadmap e entendimento
 do negócio) está em [`docs/`](docs/index.md).
 
-Tudo roda em Docker — não precisa instalar Python nem nenhuma
-dependência na sua máquina.
+## Como o projeto roda
+
+**Na rotina, tudo é automático.** Dois workflows do GitHub Actions executam
+o pipeline inteiro sem nenhum comando seu: todo dia às 21h (horário de
+Brasília) as atividades são sincronizadas e a planilha atualizada, e todo
+domingo às 20h o plano da semana é gerado, gravado na planilha, enviado por
+e-mail e agendado no relógio.
+
+**Os comandos `docker compose` deste README são só pra teste local**, um
+passo de cada vez (cada script do pipeline roda isolado, como um
+microsserviço). Servem pra desenvolver ou investigar um problema. Não é
+preciso rodar nenhum deles pra rotina funcionar. A única exceção é o
+primeiro login na Garmin, que precisa ser feito uma vez na sua máquina pra
+gerar o token de sessão (passo 3 abaixo).
+
+## Como usar este projeto com a sua conta
+
+Passo a passo pra outra pessoa, com o próprio relógio Garmin, colocar o
+projeto pra rodar e testar:
+
+1. **Copie o código pra um repositório seu no GitHub**, de preferência
+   **privado** (os workflows tratam dado de saúde). Pode ser um fork ou um
+   repositório novo com uma cópia dos arquivos. Clone na sua máquina.
+2. **Consiga as credenciais** listadas em
+   [Credenciais necessárias](#credenciais-necessárias) e preencha o `.env`
+   (`cp .env.example .env`). Todas são de planos gratuitos.
+3. **Faça o primeiro login na Garmin localmente**, uma vez só, pra gerar o
+   token de sessão. Escolha uma das duas formas:
+   - Com Docker: `docker compose build` e depois
+     `docker compose run --rm garmin python -m src.extract.garmin`
+   - Sem Docker, com [uv](https://docs.astral.sh/uv/) instalado: `uv sync` e
+     depois `uv run python -m src.extract.garmin`
+
+   O token fica em `.garmin_tokens/garmin_tokens.json` (não vai pro Git).
+4. **Cadastre os Secrets no GitHub** com o bloco de `gh secret set` da
+   [Fase 8](#fase-8--automação-github-actions). É isso que dá aos workflows
+   acesso às suas contas.
+5. **Ative os workflows** na aba **Actions** do seu repositório. Em um fork
+   eles vêm desativados até você clicar pra habilitar.
+6. **Teste manualmente, sem esperar o horário agendado**, na aba Actions
+   (botão **Run workflow**) ou pela CLI:
+
+   ```bash
+   gh workflow run "Sync atividades"
+   ```
+
+   Ao terminar, a planilha deve ter as abas **Atividades**, **Resumo
+   Semanal** e **Dor** preenchidas com suas corridas. Depois gere o plano
+   da semana corrente:
+
+   ```bash
+   gh workflow run "Análise semanal" -f semana=atual
+   ```
+
+   Confira o resultado em três lugares: a aba **Plano da Semana** da
+   planilha, o e-mail com o plano e o calendário do Garmin Connect, onde os
+   treinos aparecem agendados e chegam ao relógio na próxima sincronização.
+   Se algum passo falhar, a aba Actions mostra o log de cada etapa.
+7. **Pronto.** A partir daí os horários agendados assumem e nada mais
+   precisa ser rodado à mão. Uma semana que já tem plano não é gerada de
+   novo; pra forçar um plano novo, use `-f forcar=true` no comando acima.
+
+**O que ajustar antes de usar pra você:**
+
+- **Contexto do corredor no prompt.** O texto enviado ao Gemini descreve o
+  autor do projeto: um corredor em retomada depois de uma canelite. Esse
+  contexto está fixo em `_construir_prompt`, em
+  [`src/analyze/analisar_com_ia.py`](src/analyze/analisar_com_ia.py), e
+  orienta o plano inteiro. Reescreva com a sua situação.
+- **Fuso horário.** O projeto usa o horário de Brasília
+  (`America/Sao_Paulo`, em [`src/tempo.py`](src/tempo.py)). Os horários
+  dos workflows estão em UTC no campo `cron` de cada arquivo em
+  `.github/workflows/`. Fora desse fuso, ajuste os dois.
 
 ## Pré-requisitos
 
-- Docker + Docker Compose (opcional — só pra rodar/testar local sem instalar Python; produção roda em GitHub Actions, sem Docker)
+- Um relógio Garmin sincronizado com uma conta Garmin Connect
+- Uma conta no GitHub e a [CLI `gh`](https://cli.github.com) (pra cadastrar os Secrets e disparar os workflows)
 - Uma conta gratuita no [Neon](https://neon.tech) (Postgres gerenciado, sem cartão) — o banco vive lá, não no repositório
+- Uma conta Google (Sheets, Gemini e Gmail)
+- Docker + Docker Compose **ou** [uv](https://docs.astral.sh/uv/): só pro primeiro login na Garmin e pros testes locais; produção roda em GitHub Actions, sem Docker
+
+## Credenciais necessárias
+
+O projeto usa quatro serviços externos, todos com plano gratuito e sem
+cartão de crédito: **Garmin Connect**, **Neon** (banco), **Google** (Sheets,
+Gemini e Gmail) e o próprio **GitHub** (só pra automação). Tudo vai no
+arquivo `.env` (copiado de `.env.example`); nada disso é commitado.
+
+Você não precisa de tudo de uma vez. A coluna "Necessária a partir de" diz
+em que fase cada credencial passa a ser exigida, então dá pra começar só
+com as duas primeiras linhas e ir completando.
+
+| Variável no `.env` | Pra quê | Onde conseguir | Necessária a partir de |
+|---|---|---|---|
+| `GARMIN_EMAIL` | Login na Garmin Connect | O e-mail da conta que você já usa no app Garmin Connect | Fase 0 |
+| `GARMIN_PASSWORD` | Senha da mesma conta | A senha dessa conta. Local: pode ficar em branco, o script pede no terminal. Produção: só fallback (ver Fase 8) | Fase 0 (opcional) |
+| `DATABASE_URL` | Banco Postgres (Neon) | Crie uma conta grátis em [neon.tech](https://neon.tech), crie um projeto e, em [console.neon.tech](https://console.neon.tech), aba **Connect**, copie a string de conexão. Ela precisa terminar com `sslmode=require` | Fase 1 |
+| `GOOGLE_SHEETS_CREDENTIALS_PATH` | Caminho do JSON da conta de serviço | Já vem preenchido no `.env.example` (`.google_sheets_credentials.json`). O arquivo você gera no passo a passo da [Fase 6](#fase-6--planilha-google-sheets-dor--dashboard-de-desempenho) | Fase 6 |
+| `GOOGLE_SHEET_ID` | Qual planilha usar | Crie uma planilha no Google Sheets e copie da URL o trecho entre `/d/` e `/edit`. Compartilhe a planilha, como **Editor**, com o `client_email` do JSON da conta de serviço | Fase 6 |
+| `GEMINI_API_KEY` | Gerar o plano semanal | Em [aistudio.google.com/apikey](https://aistudio.google.com/apikey), com sua conta Google | Fase 7 |
+| `GEMINI_MODEL` | Modelo do Gemini | Opcional. Sem ele, usa `gemini-3.5-flash` | Fase 7 (opcional) |
+| `EMAIL_REMETENTE` | Conta que envia o plano e os lembretes | Um endereço **Gmail** seu (o envio é fixo em `smtp.gmail.com`) | Fase 7 |
+| `EMAIL_SENHA_APP` | Senha de app do Gmail | Em [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords). Exige a verificação em 2 etapas ativada na conta. Não é a senha normal do Gmail | Fase 7 |
+| `EMAIL_DESTINATARIO` | Quem recebe os e-mails | Opcional. Sem ele, vai pro próprio `EMAIL_REMETENTE` | Fase 7 (opcional) |
+
+**Só pra automação (GitHub Actions, Fase 8):** além das variáveis acima,
+os workflows usam dois Secrets que não ficam no `.env`, porque são
+arquivos gerados localmente:
+
+| Secret | O que é | Onde conseguir |
+|---|---|---|
+| `GARMIN_TOKEN` | Sessão já autenticada na Garmin, pra não depender de senha em produção | Rode qualquer script que faça login (ex. `docker compose run --rm garmin python -m src.extract.garmin`). O primeiro login cria `.garmin_tokens/garmin_tokens.json`, e é o conteúdo desse arquivo que vira o Secret |
+| `GOOGLE_SHEETS_CREDENTIALS_JSON` | O JSON da conta de serviço do Google | O conteúdo do `.google_sheets_credentials.json` da Fase 6 |
+
+Os comandos `gh secret set` que cadastram tudo isso estão na
+[Fase 8](#fase-8--automação-github-actions). Eles precisam da CLI `gh`
+autenticada na sua conta do GitHub (`gh auth login`).
+
+A Fase 12 (enviar o treino pro relógio) não pede nenhuma credencial nova:
+usa o mesmo login da Garmin da Fase 0.
 
 ## Configuração inicial
 
@@ -21,16 +135,20 @@ cp .env.example .env
 docker compose build
 ```
 
-Abra o `.env` e preencha `GARMIN_EMAIL` e `DATABASE_URL` (string de conexão
-do Neon — pegue em console.neon.tech, aba "Connect", com `sslmode=require`).
-Pode deixar `GARMIN_PASSWORD` em branco — nesse caso o script pede a senha
-no terminal a cada execução (via `getpass`, não aparece na tela).
+Abra o `.env` e preencha as variáveis da tabela acima. Pra rodar só a
+primeira etapa, bastam `GARMIN_EMAIL` e `DATABASE_URL`. Pode deixar
+`GARMIN_PASSWORD` em branco — nesse caso o script pede a senha no terminal
+a cada execução (via `getpass`, não aparece na tela).
 
 No primeiro login bem-sucedido, o token de sessão fica salvo em
 `.garmin_tokens/` (gitignored) e é reaproveitado nas execuções seguintes
 — você não precisa digitar a senha de novo, só se o token expirar.
 
 ## Como rodar cada fase
+
+Esta seção é pra teste local, um passo de cada vez. Na rotina nada disso
+precisa ser rodado: os workflows executam tudo (ver
+[Como o projeto roda](#como-o-projeto-roda)).
 
 ### Fase 0 — explorar a API (`explore/inspect_garmin.py`)
 
