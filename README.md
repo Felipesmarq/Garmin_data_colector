@@ -353,48 +353,6 @@ enquanto -- não influencia a geração do plano seguinte.
     └── ENTENDIMENTO_DO_NEGOCIO.pdf  # mesmo documento, em PDF
 ```
 
-## Status
-
-Fases 0 a 7 implementadas e **validadas contra o Neon e o Gemini reais**
-(schema aplicado, idempotência dos loaders testada, plano semanal gerado
-e escrito na planilha ponta a ponta, guardrails de ACWR/dor confirmados
-disparando). Fase 8 (GitHub Actions) com os workflows escritos e
-validados sintaticamente, pendente de: você configurar os Secrets
-(comandos acima) e deixar rodar pelo menos 2 semanas sem intervenção
-manual pra fechar o critério de aceite. Fases 9 a 11 (verificação de
-aderência, filtro de tokens, revisão de coerência) implementadas e
-**validadas contra o Neon, a planilha e o Gemini reais** (comparação com
-margem, soma de múltiplas atividades no dia, upsert idempotente, e-mail
-de lembrete testado, teto de tokens confirmado com prompt real e
-sintético, revisão de coerência aprovando plano real e reprovando plano
-sintético com violação disfarçada de guardrail). Também corrigido um bug
-real de fuso horário que fazia o plano semanal ser gerado pra semana
-errada quando o cron do GitHub Actions atrasava (ver seção 11 do case).
-Fase 12 (enviar o plano como treino estruturado pro relógio) implementada,
-testada na conta real do Garmin Connect e exercitada numa rodada real no
-GitHub Actions; falta confirmar a chegada ao relógio. Semana que já tem
-plano na planilha não é mais regerada (idempotência ponta a ponta). Falta: Fase 13 (ajuste fino).
-Roadmap completo e critérios de aceite por fase na seção 7 do
-[`docs/CASE_DO_PROJETO_1.md`](docs/CASE_DO_PROJETO_1.md).
-
-## Solução de problemas
-
-- **Build falha com "requires a different python version"**: o
-  Dockerfile já usa `python:3.12-slim` (a lib `garminconnect` exige
-  Python ≥3.12 a partir da versão 0.3.3). Se você alterar a imagem base,
-  o build volta a falhar.
-- **"Senha incorreta" repetido**: a Garmin aplica rate limit e pode
-  bloquear a conta temporariamente após várias tentativas seguidas. O
-  script para sozinho depois de 5 tentativas — se isso acontecer, espere
-  um pouco ou use "Esqueci minha senha" no app da Garmin.
-- **Perdeu o login salvo**: apague `.garmin_tokens/` e rode de novo — ele
-  pede email/senha e recria o token.
-- **Workflow do GitHub Actions falha com "Token da Garmin inválido/expirado"**:
-  o `GARMIN_TOKEN` (Secret) expirou ou foi revogado. Rode `docker compose
-  run --rm garmin python -m src.extract.garmin` localmente pra reautenticar
-  (recria `.garmin_tokens/garmin_tokens.json`), depois rode de novo o bloco
-  de `gh secret set` (seção Fase 8) pra atualizar o Secret.
-
 ## Dados sensíveis
 
 `.env`, `.garmin_tokens/` e `.google_sheets_credentials.json` guardam
