@@ -410,6 +410,51 @@ status, um e-mail curto de lembrete é enviado (mesmo mecanismo do e-mail
 semanal, `EMAIL_REMETENTE`/`EMAIL_SENHA_APP`). Puramente informativo por
 enquanto -- não influencia a geração do plano seguinte.
 
+## Uso de IA
+
+### No produto: o modelo que gera o plano
+
+- **Modelo:** `gemini-3.5-flash`, do Google, chamado pela API do Gemini
+  (SDK `google-genai` 2.23.0, versão travada no `uv.lock`). Nenhum modelo
+  foi treinado neste projeto: é um modelo de terceiro, pré-treinado, usado
+  como está. Outro modelo do Gemini pode ser escolhido pela variável
+  `GEMINI_MODEL`.
+- **O que ele decide:** o plano de treino da semana, dia a dia (tipo de
+  treino, distância ou duração, faixa de pace e de FC, e o motivo de cada
+  dia), a partir das últimas 4 semanas de treino, recuperação, dor e das
+  observações da planilha.
+- **O que ele não decide:** tudo que pode ser calculado é calculado em
+  Python ou SQL, não pedido ao modelo. As datas da semana, a carga de
+  treino (ACWR) e os limites de segurança por dor e por sobrecarga são
+  calculados antes e entram no prompt como regras obrigatórias.
+- **Controles em volta do modelo:**
+  - A resposta precisa seguir um formato fixo (schema validado com
+    Pydantic); texto fora do formato é rejeitado.
+  - Uma segunda chamada, independente da primeira, revisa se o plano é
+    coerente com os dados e com as regras de segurança. Plano reprovado é
+    gerado de novo, até 3 tentativas; se nenhuma passar, nada é gravado nem
+    enviado.
+  - O prompt tem um teto de 200 mil tokens, checado antes de cada chamada.
+- **Limites:** o plano é uma recomendação gerada por IA, não orientação de
+  um profissional de saúde ou de educação física. Os dados de treino vão
+  pra API do Google; segundo os termos do Google, no nível gratuito o
+  conteúdo enviado pode ser usado pra melhorar os produtos dele. Na branch
+  SR1, os dados enviados são todos simulados.
+
+### No desenvolvimento
+
+O projeto foi desenvolvido com o apoio do **Claude Code**, assistente de
+programação da Anthropic. Ele foi usado pra escrever e revisar código,
+investigar e corrigir bugs, montar os workflows do GitHub Actions e
+redigir a documentação (este README e os textos em `docs/`).
+
+As decisões de produto e de arquitetura, os requisitos e a validação são do
+autor: cada fase foi definida antes de ser implementada, testada contra os
+dados e serviços reais (banco, planilha, Gemini, Garmin) e conferida no uso
+de verdade. Vários bugs foram encontrados assim, usando o sistema no dia a
+dia, e o registro de cada decisão está em
+[`docs/CASE_DO_PROJETO_1.md`](docs/CASE_DO_PROJETO_1.md).
+
 ## Estrutura do projeto
 
 ```
