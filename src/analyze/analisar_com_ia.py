@@ -63,6 +63,12 @@ MAX_TENTATIVAS_REVISAO = 3
 
 DIAS_SEMANA_PT = ["Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado", "Domingo"]
 
+# O repositório é público, e com ele os logs do GitHub Actions. No Actions, o
+# log não mostra conteúdo de saúde (plano com os motivos, nível de dor,
+# justificativa da revisão) -- isso já chega completo por e-mail, planilha e
+# relógio. Rodando local, tudo continua sendo impresso.
+EM_CI = bool(os.environ.get("GITHUB_ACTIONS"))
+
 ZONA_SEGURA_MIN = 0.8
 ZONA_SEGURA_MAX = 1.3
 ZONA_ALERTA_REFORCADO = 1.5
@@ -683,6 +689,13 @@ def _texto_plano(plano: PlanoSemanal, dias: list[date]) -> str:
 
 
 def _imprimir_plano(plano: PlanoSemanal, dias: list[date]) -> None:
+    if EM_CI:
+        treinos = sum(1 for d in plano.dias if not d.descanso)
+        print(
+            f"[plano da semana de {dias[0]} gerado: {treinos} treino(s), {7 - treinos} descanso(s) "
+            "-- conteúdo completo no e-mail, na planilha e no relógio]"
+        )
+        return
     print(_texto_plano(plano, dias))
 
 
@@ -737,7 +750,10 @@ if __name__ == "__main__":
         i for i in (_instrucao_guardrail_acwr(acwr_atual), _instrucao_guardrail_dor(dor_recente)) if i
     ]
     if instrucoes:
-        print(f"[guardrail(s) ativado(s) -- ACWR atual: {acwr_atual}, dor recente: {dor_recente}]\n")
+        if EM_CI:
+            print(f"[{len(instrucoes)} guardrail(s) ativado(s)]\n")
+        else:
+            print(f"[guardrail(s) ativado(s) -- ACWR atual: {acwr_atual}, dor recente: {dor_recente}]\n")
 
     observacoes = _observacoes_recentes(spreadsheet)
 
@@ -758,6 +774,9 @@ if __name__ == "__main__":
             if tentativa > 1:
                 print(f"[plano aprovado pela revisão de coerência na tentativa {tentativa}/{MAX_TENTATIVAS_REVISAO}]")
             break
+        if EM_CI:
+            print(f"[revisão reprovou a tentativa {tentativa}/{MAX_TENTATIVAS_REVISAO}: {len(revisao.problemas)} problema(s)]")
+            continue
         print(f"[revisão reprovou a tentativa {tentativa}/{MAX_TENTATIVAS_REVISAO}: {revisao.motivo}]")
         for problema in revisao.problemas:
             print(f"  - {problema}")
