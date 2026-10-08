@@ -6,6 +6,94 @@ cuidado pra não repetir o padrão de sobrecarga que já causou canelite uma
 vez. Documentação completa (contexto, arquitetura, roadmap e entendimento
 do negócio) está em [`docs/`](docs/index.md).
 
+## Branch SR1: testar sem relógio Garmin
+
+Esta branch é uma versão de teste do projeto pra quem **não tem relógio
+Garmin**. No lugar da conta Garmin, uma Garmin simulada
+([`src/extract/garmin_simulado.py`](src/extract/garmin_simulado.py)) gera os
+dados que o relógio geraria: corridas no método run-walk (~3 por semana,
+com distância, pace, FC, zonas de FC, cadência e splits) e a recuperação
+diária (sono, FC de repouso, body battery). O dado sai no mesmo formato da
+API real, então todo o resto do pipeline roda igual: banco, planilha,
+plano semanal com o Gemini, e-mail e verificação de aderência.
+
+O que muda em relação à versão principal:
+
+- **Não precisa de conta Garmin**, nem de login, token ou Secret da Garmin.
+- **Histórico pronto desde o primeiro sync:** a simulação já tem 10
+  semanas de treinos, então o banco nasce com dado suficiente pro cálculo de
+  carga (ACWR) e pro plano.
+- **O corredor simulado segue o plano.** Num dia com treino planejado, ele
+  corre o que a IA planejou, na maioria das vezes dentro da margem, às vezes
+  fora, às vezes pula o dia. Assim a verificação de aderência e o e-mail de
+  lembrete aparecem funcionando. Sem plano, segue uma agenda fixa (segunda,
+  quinta e sábado).
+- **O envio do treino ao relógio (Fase 12) fica desligado**, porque não há
+  relógio.
+- O dado é sempre o mesmo pra uma mesma data: rodar o sync de novo não
+  duplica nada.
+
+### Passo a passo
+
+1. **Faça um fork deste repositório incluindo a branch SR1.** Na tela de
+   fork do GitHub, **desmarque** a opção "Copy the `main` branch only".
+2. **Torne a SR1 a branch padrão do seu fork**: Settings → General →
+   Default branch. O GitHub só roda os horários agendados (`cron`) na branch
+   padrão; sem isso, os workflows rodam apenas quando disparados à mão.
+3. **Consiga as credenciais** da tabela em
+   [Credenciais necessárias](#credenciais-necessárias), **exceto as da
+   Garmin** (`GARMIN_EMAIL`, `GARMIN_PASSWORD` e `GARMIN_TOKEN` não são
+   usados aqui): Neon, conta de serviço do Google Sheets com a planilha
+   compartilhada, chave do Gemini e senha de app do Gmail. Todas são
+   gratuitas.
+4. **Cadastre os Secrets no seu fork** (Settings → Secrets and variables →
+   Actions, ou pela CLI `gh`, autenticada e na raiz do clone, com o `.env`
+   preenchido):
+
+   ```bash
+   gh secret set DATABASE_URL --body "$(grep '^DATABASE_URL=' .env | cut -d= -f2-)"
+   gh secret set GOOGLE_SHEET_ID --body "$(grep '^GOOGLE_SHEET_ID=' .env | cut -d= -f2-)"
+   gh secret set GEMINI_API_KEY --body "$(grep '^GEMINI_API_KEY=' .env | cut -d= -f2-)"
+   gh secret set EMAIL_REMETENTE --body "$(grep '^EMAIL_REMETENTE=' .env | cut -d= -f2-)"
+   gh secret set EMAIL_SENHA_APP --body "$(grep '^EMAIL_SENHA_APP=' .env | cut -d= -f2-)"
+   gh secret set GOOGLE_SHEETS_CREDENTIALS_JSON < .google_sheets_credentials.json
+   ```
+
+   `GEMINI_MODEL` e `EMAIL_DESTINATARIO` são opcionais.
+5. **Ative os workflows** na aba **Actions** do fork (em fork eles vêm
+   desativados).
+6. **Rode o sync** na aba Actions (**Run workflow**, escolhendo a branch
+   SR1) ou pela CLI:
+
+   ```bash
+   gh workflow run "Sync atividades" --ref SR1
+   ```
+
+   A planilha ganha as abas **Atividades** (corridas marcadas como
+   "simulada"), **Resumo Semanal** e **Dor**, com as 10 semanas de
+   histórico.
+7. **Gere o plano da semana corrente:**
+
+   ```bash
+   gh workflow run "Análise semanal" --ref SR1 -f semana=atual
+   ```
+
+   O plano aparece na aba **Plano da Semana** e chega por e-mail. Na aba
+   **Atividades**, os dias de treino ficam com status `PLANEJADO`.
+8. **Acompanhe nos dias seguintes.** O sync diário (21h, horário de
+   Brasília) traz as corridas simuladas que seguem o plano e, quando um dia
+   planejado passa, troca o status pra `REALIZADO_DENTRO_DA_MARGEM`,
+   `REALIZADO_FORA_DA_MARGEM` ou `NÃO_REALIZADO`. Se o dia anterior ficou
+   pendente, chega um e-mail de lembrete. Pra ver isso sem esperar, rode o
+   sync de novo à mão depois que um dia planejado tiver passado.
+
+Pra testar a parte manual, preencha na aba **Dor** uma nota de 0 a 5 em
+alguma corrida e rode o sync: com dor 2 ou mais, o próximo plano gerado
+segura a intensidade (guardrail de dor).
+
+As seções abaixo descrevem a versão principal, com relógio de verdade. Na
+SR1, ignore o que fala de login, token ou envio de treino pra Garmin.
+
 ## Como o projeto roda
 
 **Na rotina, tudo é automático.** Dois workflows do GitHub Actions executam
