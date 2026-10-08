@@ -88,9 +88,12 @@ def carregar(con: psycopg.Connection, atividades: list[dict]) -> int:
 if __name__ == "__main__":
     from src.extract.garmin import atividades_novas
     from src.extract.garmin import conectar as conectar_garmin
+    from src.extract.garmin_simulado import HISTORICO_DIAS
 
     api = conectar_garmin()
-    novas = atividades_novas(api, dias=7)
+    # SR1: a janela inteira da Garmin simulada a cada sync (local, sem custo),
+    # pra um banco vazio já começar com histórico -- ver garmin_simulado.py.
+    novas = atividades_novas(api, dias=HISTORICO_DIAS, limite=1000)
 
     con = conectar()
     n = carregar(con, novas)

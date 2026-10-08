@@ -47,11 +47,13 @@ if __name__ == "__main__":
 
     from src.extract.garmin import conectar as conectar_garmin
     from src.extract.garmin import recuperacao_diaria
+    from src.extract.garmin_simulado import HISTORICO_DIAS
     from src.tempo import hoje_brt
 
     api = conectar_garmin()
     dias = []
-    for i in range(7):
+    # SR1: janela inteira da Garmin simulada, mesmo motivo de load_atividades.
+    for i in range(HISTORICO_DIAS):
         # hoje_brt(), não date.today() -- esse job roda às 21h BRT = 00h
         # UTC (virada de dia), então date.today() no runner (UTC) já
         # devolveria amanhã em BRT em qualquer atraso de agendamento.
