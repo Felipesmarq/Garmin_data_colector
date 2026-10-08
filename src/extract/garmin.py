@@ -42,7 +42,16 @@ MAX_LOGIN_ATTEMPTS = 5
 # extraída aqui pra ser reusada pelo pipeline de verdade.
 # =====================================================================
 
-def conectar() -> Garmin:
+def conectar():
+    """Branch SR1: devolve a Garmin simulada (ver garmin_simulado.py) -- esta
+    versão do projeto roda sem relógio nem conta Garmin. O login de verdade
+    continua em `_conectar_garmin_real`, igual ao da branch main."""
+    from src.extract.garmin_simulado import GarminSimulado
+
+    return GarminSimulado()
+
+
+def _conectar_garmin_real() -> Garmin:
     """Autentica na Garmin, reaproveitando o token salvo quando existir.
 
     Levanta RuntimeError se o rate limit da Garmin for atingido ou se
