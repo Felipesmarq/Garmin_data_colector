@@ -8,7 +8,7 @@
 
 Confirmar, com dado real (não suposição), quais campos a Garmin Connect API
 devolve pra atividades, sono, frequência cardíaca e recuperação — pra fechar
-o `schema.sql` da Fase 1 com base na realidade da conta do Felipe (Forerunner
+o `schema.sql` da Fase 1 com base na realidade da conta do usuário (Forerunner
 165), não no que o case original supôs.
 
 ## 2. Ambiente de execução

@@ -22,7 +22,7 @@
 
 ## 1. Contexto
 
-Felipe é um corredor construindo o hábito de correr depois de meses lidando com
+O usuário é um corredor construindo o hábito de correr depois de meses lidando com
 canelite (síndrome do estresse tibial medial). O treino evoluiu com um plano de
 retomada gradual (método run-walk, regra dos 10%, fortalecimento de tibial
 anterior). O relógio Garmin Forerunner 165 já capta dado objetivo (distância,
@@ -171,7 +171,7 @@ seção 6.1), tendência de sono/FC repouso/body battery.
 Pesquisa feita antes de implementar, pra embasar (e revisar) o que entra em
 `vw_sessoes_ia` com base na literatura de ciência do esporte, não em
 intuição. Explicação genérica dos grupos de dado — não usa números reais do
-Felipe.
+usuário.
 
 ### Carga de treino e risco de sobrecarga
 
@@ -327,7 +327,7 @@ precisar saber os limiares.
 Pesquisa feita em 2026-08-14 pra dar ao prompt da Fase 7 um vocabulário de
 tipo de treino mais específico que `classificacao_atividade` (que só
 repete o rótulo opaco da Garmin — seção anterior). Explicação genérica do
-método — sem números reais do treino do Felipe.
+método — sem números reais do treino do usuário.
 
 **Fonte:** o sistema de zonas de treino de Jack Daniels (*Daniels' Running
 Formula*), referência padrão em ciência do esporte pra treino de corrida,
@@ -364,7 +364,7 @@ máxima), o que a estrutura de split não é. Regra (implementada em
   `classificacao_atividade`).
 - Nenhum dos critérios acima → **Rodagem/Recuperação** (default).
 
-**Validação:** testado contra o histórico real de atividades do Felipe
+**Validação:** testado contra o histórico real de atividades do usuário
 antes de virar código definitivo (não só teoria) — resultado confirmado
 como coerente com o esforço percebido de cada sessão. Um achado notável:
 com o volume de treino até 2026-08-14, `efeito_treino_anaerobico` nunca
