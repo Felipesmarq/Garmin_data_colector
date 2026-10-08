@@ -24,6 +24,12 @@ jobs:
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
       GOOGLE_SHEETS_CREDENTIALS_PATH: .google_sheets_credentials.json
       GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+      # E-mail de lembrete de treino pendente (Fase 9, planilha_desempenho).
+      # Sem estas três, o lembrete dava KeyError e o retry do passo escondia
+      # a falha: na 2ª tentativa o dia já estava resolvido e nada era enviado.
+      EMAIL_REMETENTE: ${{ secrets.EMAIL_REMETENTE }}
+      EMAIL_SENHA_APP: ${{ secrets.EMAIL_SENHA_APP }}
+      EMAIL_DESTINATARIO: ${{ secrets.EMAIL_DESTINATARIO }}
     steps:
       - uses: actions/checkout@v4
 
