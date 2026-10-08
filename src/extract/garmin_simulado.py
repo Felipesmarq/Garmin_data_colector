@@ -173,12 +173,25 @@ def _sessao_do_dia(dia: date, plano: dict[date, dict]) -> dict | None:
 
         faixa_pace = _parse_faixa_pace(planejado["pace_alvo"]) or PACE_POR_TIPO.get(tipo, (9.5, 11.5))
         pace = rng.uniform(*faixa_pace)
+        if planejado["distancia_km"] and planejado["duracao_min"]:
+            # Plano com distância E duração: a Fase 9 confere as duas, então
+            # o pace tem que ser o que elas implicam (dentro da faixa do plano).
+            implicito = planejado["duracao_min"] / planejado["distancia_km"]
+            pace = min(max(implicito, faixa_pace[0]), faixa_pace[1])
         faixa_fc = _parse_faixa_fc(planejado["fc_alvo"]) or FC_POR_TIPO.get(tipo, (128, 140))
         fc = rng.randint(*faixa_fc)
 
         # Fora da margem = volume fora dos ±20% da Fase 9; dentro = ±8%.
         fator = rng.choice([rng.uniform(0.55, 0.70), rng.uniform(1.30, 1.45)]) if fora else rng.uniform(0.92, 1.08)
-        if planejado["distancia_km"]:
+        if planejado["distancia_km"] and planejado["duracao_min"]:
+            # Plano incoerente (distância e duração que não fecham com a faixa
+            # de pace) acontece: corre a distância que mais se aproxima da
+            # duração planejada, sem sair de ±10% da distância (com a variação
+            # de ±8% do "dentro", fica no máximo em ±19%, ainda na margem).
+            alvo = planejado["duracao_min"] / pace
+            base = min(max(alvo, planejado["distancia_km"] * 0.90), planejado["distancia_km"] * 1.10)
+            distancia = base * fator
+        elif planejado["distancia_km"]:
             distancia = planejado["distancia_km"] * fator
         elif planejado["duracao_min"]:
             distancia = planejado["duracao_min"] * fator / pace
