@@ -40,8 +40,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
-      GARMIN_EMAIL: ${{ secrets.GARMIN_EMAIL }}
-      GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
       GOOGLE_SHEETS_CREDENTIALS_PATH: .google_sheets_credentials.json
       GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -65,13 +63,6 @@ jobs:
 
       - name: Instalar dependências
         run: uv sync --frozen
-
-      - name: Restaurar token da Garmin
-        run: |
-          mkdir -p .garmin_tokens
-          printf '%s' "$GARMIN_TOKEN" > .garmin_tokens/garmin_tokens.json
-        env:
-          GARMIN_TOKEN: ${{ secrets.GARMIN_TOKEN }}
 
       - name: Restaurar credencial do Google Sheets
         run: printf '%s' "$GOOGLE_SHEETS_CREDENTIALS_JSON" > .google_sheets_credentials.json
