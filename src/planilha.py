@@ -120,6 +120,9 @@ def sobrescrever(aba: gspread.Worksheet, cabecalho: list[str], linhas: list[tupl
     mais seguro que calcular um diff.
     """
     aba.clear()
+    # aba criada com menos colunas que o cabeçalho atual (coluna nova na view)
+    if aba.col_count < len(cabecalho):
+        aba.add_cols(len(cabecalho) - aba.col_count)
     aba.append_row(cabecalho)
     inserir_linhas(aba, [[_texto(v) for v in linha] for linha in linhas])
 

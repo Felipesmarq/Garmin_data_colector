@@ -221,8 +221,20 @@ SELECT
     -- treino run-walk de recuperação passa a maior parte do tempo em
     -- RWD_WALK só por estrutura, não por ser de baixa intensidade -- então
     -- estrutura de split classificaria errado; zona de FC não.
+    --
+    -- Exceção à regra acima: atividade gravada no modo corrida mas com
+    -- menos de 6% do tempo em RWD_RUN é caminhada (ex. caminhada leve de
+    -- recuperação), não treino run-walk. No dado real de 2026-10 os treinos
+    -- run-walk ficaram entre 10% e 70% correndo, e as caminhadas entre 0,4%
+    -- e 4,9%. O corte fica perto das caminhadas porque a 1ª sessão do
+    -- protocolo de retomada (3 min de trote em 30) dá ~10%, e erro de
+    -- detecção não pode jogá-la pra Caminhada (ela sairia da conta de
+    -- progressão em analisar_com_ia._estado_retomada). Sem isso, caminhada
+    -- de 40min em FC baixa virava "Longão".
     CASE
         WHEN a.efeito_treino_label = 'UNKNOWN' THEN 'Caminhada'
+        WHEN s.segundos_correndo / NULLIF(s.segundos_correndo + s.segundos_caminhando, 0) < 0.06
+            THEN 'Caminhada'
         WHEN z.total IS NULL OR z.total = 0 THEN 'Rodagem/Recuperação'
         WHEN a.efeito_treino_anaerobico >= 1.5 AND z.alta / z.total >= 0.3
             THEN CASE WHEN a.duracao_seg / 60.0 < 20 THEN 'Tiro' ELSE 'Intervalado' END
@@ -230,7 +242,15 @@ SELECT
         WHEN z.alta / z.total >= 0.20 OR z.media / z.total >= 0.30 THEN 'Ritmo'
         WHEN z.baixa / z.total >= 0.85 AND a.duracao_seg / 60.0 >= 35 THEN 'Longão'
         ELSE 'Rodagem/Recuperação'
-    END AS tipo_treino
+    END AS tipo_treino,
+    -- km_corridos: distância ponderada pela fração do tempo em RWD_RUN --
+    -- é a carga de impacto que importa pro risco de canelite, e é a base do
+    -- ACWR em vw_resumo_semanal. Caminhada gravada no modo corrida entra
+    -- com peso ~0 em vez de somar a distância inteira. Sem splits de
+    -- run/walk, conta a distância toda (lado conservador).
+    a.distancia_m / 1000.0 * COALESCE(
+        s.segundos_correndo / NULLIF(s.segundos_correndo + s.segundos_caminhando, 0), 1
+    ) AS km_corridos
 FROM stg_atividades a
 LEFT JOIN zonas z ON z.activity_id = a.activity_id
 LEFT JOIN (
@@ -312,9 +332,22 @@ FROM vw_sessoes;
 -- VIEW: vw_resumo_semanal — agregação por semana ISO (semana começa
 -- segunda) + ACWR (Acute:Chronic Workload Ratio -- ver CASE_DO_PROJETO_1.md
 -- seção 6.1). Granularidade semanal (não diária) porque o relatório roda
--- 1x/semana: carga aguda = km da semana corrente, carga crônica = média
--- das últimas 4 semanas (semana corrente + 3 anteriores). Zona segura
--- 0.8-1.3; risco alto acima de 1.5.
+-- 1x/semana: carga aguda = km corridos da semana corrente, carga crônica =
+-- média das últimas 4 semanas (semana corrente + 3 anteriores). Zona
+-- segura 0.8-1.3; risco alto acima de 1.5.
+--
+-- Carga em km_corridos (ver vw_sessoes), não km_total: caminhada gravada
+-- no modo corrida inflava o ACWR (semana de 2026-10-05: 14,7 km totais,
+-- 0,3 km corridos, ACWR 1.78). variacao_pct_km_vs_semana_anterior,
+-- carga_cronica_km e acwr usam km corridos; km_total segue sendo a
+-- distância total, só informativa.
+--
+-- Semanas sem atividade entram com 0 (generate_series), pra "últimas 4
+-- semanas" ser calendário e não "últimas 4 semanas com atividade" -- antes,
+-- depois de uma pausa, a média crônica pulava as semanas paradas.
+-- Até a semana da última atividade, não CURRENT_DATE: o banco roda em UTC
+-- e um atraso no cron de domingo criaria uma semana nova vazia (mesmo
+-- cuidado de hoje_brt() no Python).
 -- =====================================================================
 CREATE OR REPLACE VIEW vw_resumo_semanal AS
 WITH semanal AS (
@@ -326,9 +359,28 @@ WITH semanal AS (
         AVG(dor)                       AS dor_media,
         MAX(dor)                       AS dor_maxima,
         AVG(sono_score)                AS sono_score_medio,
-        AVG(fc_repouso)                AS fc_repouso_media
+        AVG(fc_repouso)                AS fc_repouso_media,
+        SUM(km_corridos)               AS km_corridos
     FROM vw_sessoes
     GROUP BY 1
+),
+calendario AS (
+    SELECT generate_series(MIN(semana_inicio), MAX(semana_inicio), interval '1 week')::date AS semana_inicio
+    FROM semanal
+),
+completo AS (
+    SELECT
+        c.semana_inicio,
+        COALESCE(s.km_total, 0)          AS km_total,
+        COALESCE(s.duracao_total_min, 0) AS duracao_total_min,
+        COALESCE(s.num_atividades, 0)    AS num_atividades,
+        s.dor_media,
+        s.dor_maxima,
+        s.sono_score_medio,
+        s.fc_repouso_media,
+        COALESCE(s.km_corridos, 0)       AS km_corridos
+    FROM calendario c
+    LEFT JOIN semanal s ON s.semana_inicio = c.semana_inicio
 )
 SELECT
     semana_inicio,
@@ -340,17 +392,18 @@ SELECT
     sono_score_medio,
     fc_repouso_media,
     ROUND(
-        (100.0 * (km_total - LAG(km_total) OVER (ORDER BY semana_inicio))
-        / NULLIF(LAG(km_total) OVER (ORDER BY semana_inicio), 0))::numeric,
+        (100.0 * (km_corridos - LAG(km_corridos) OVER (ORDER BY semana_inicio))
+        / NULLIF(LAG(km_corridos) OVER (ORDER BY semana_inicio), 0))::numeric,
         1
     ) AS variacao_pct_km_vs_semana_anterior,
     ROUND(
-        AVG(km_total) OVER (ORDER BY semana_inicio ROWS BETWEEN 3 PRECEDING AND CURRENT ROW)::numeric,
+        AVG(km_corridos) OVER (ORDER BY semana_inicio ROWS BETWEEN 3 PRECEDING AND CURRENT ROW)::numeric,
         2
     ) AS carga_cronica_km,
     ROUND(
-        (km_total / NULLIF(AVG(km_total) OVER (ORDER BY semana_inicio ROWS BETWEEN 3 PRECEDING AND CURRENT ROW), 0))::numeric,
+        (km_corridos / NULLIF(AVG(km_corridos) OVER (ORDER BY semana_inicio ROWS BETWEEN 3 PRECEDING AND CURRENT ROW), 0))::numeric,
         2
-    ) AS acwr
-FROM semanal
+    ) AS acwr,
+    ROUND(km_corridos::numeric, 2) AS km_corridos
+FROM completo
 ORDER BY semana_inicio;

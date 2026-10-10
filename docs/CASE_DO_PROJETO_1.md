@@ -214,6 +214,91 @@ pra caber no ritmo do projeto.
   `AVG(km_total) OVER (ORDER BY semana_inicio ROWS BETWEEN 3 PRECEDING AND CURRENT ROW)`.
 - **ACWR** = carga aguda / carga crônica.
 
+**Revisão de 2026-10 (carga em km corridos):** a "carga" de cima passou a
+ser `km_corridos`, não `km_total`: a distância de cada atividade ponderada
+pela fração do tempo em RWD_RUN (detecção de corrida/caminhada do Garmin).
+Motivo: caminhadas leves gravadas no modo corrida somavam a distância
+inteira, e uma semana de 14,7 km totais (0,3 km efetivamente corridos),
+logo depois de uma pausa, gerou ACWR 1.78 e alerta de sobrecarga falso.
+Atividade com menos de 6% do tempo correndo também passou a ser
+classificada como `Caminhada` em `vw_sessoes.tipo_treino` (no dado real,
+caminhadas ficaram entre 0,4% e 4,9%, treinos run-walk entre 10% e 70%).
+Semanas sem atividade agora entram com 0 (antes a janela de 4 linhas
+pulava as semanas paradas).
+
+### Carga por sessão, não por semana (Frandsen et al., 2025)
+
+Estudo de coorte com **5.205 corredores de 87 países, acompanhados por 18
+meses com dado de relógio Garmin** (Frandsen JSB, Nielsen RO et al., *How
+much running is too much? Identifying high-risk running sessions in a
+5200-person cohort study*, British Journal of Sports Medicine 2025;
+59(17):1203-1210, PMID 40623829). Comparou três medidas de carga: a
+distância de cada sessão contra a sessão mais longa dos 30 dias
+anteriores, o ACWR e a variação semana a semana.
+
+| Sessão vs. a mais longa dos últimos 30 dias | Taxa de lesão por sobrecarga (HRR) |
+|---|---|
+| até +10% (referência) | 1,00 |
+| +10% a +30% | 1,64 (IC 95% 1,31-2,05) |
+| +30% a +100% | 1,52 (IC 95% 1,16-2,00) |
+| acima de +100% | 2,28 (IC 95% 1,50-3,48) |
+
+Já o ACWR teve relação dose-resposta **negativa** com lesão, e a variação
+semana a semana, nenhuma. A conclusão dos autores é tratar uma sessão mais
+de 10% maior que a mais longa recente como "sinal vermelho" e avaliar
+carga sessão a sessão. Limites: estudo observacional (associação, não
+causa), com corredores em geral, não especificamente pós-lesão.
+
+O que o projeto faz com isso: fora da retomada (abaixo), cada sessão do
+plano tem teto de **110% da sessão mais longa (em km corridos) dos últimos
+30 dias** (`_instrucao_teto_sessao`), conferido em Python no plano
+devolvido (`_violacoes_regras`). O ACWR continua no prompt como guardrail
+secundário, já que a evidência a favor dele enfraqueceu.
+
+### Retomada pós-canelite (protocolo de Warden + progressão semanal de 10%)
+
+Volta à corrida depois de lesão óssea da tíbia (canelite incluída) segue,
+na literatura clínica, uma progressão **por sessão, em minutos de trote,
+em dias alternados e travada por sintoma**, não por volume semanal. A
+referência mais citada é o programa graduado de Warden et al. (adaptado no
+BJSM): 3 blocos de 10 min de caminhada + trote (9/1, 8/2, 7/3, 6/4, 4/6,
+2/8 min), com dia de descanso entre as sessões, trote bem leve, depois 30
+min contínuos. Regra de sintoma: nenhuma dor durante, depois e no dia
+seguinte; com dor, para a sessão e volta um degrau. A revisão de escopo de
+George et al. sobre retomada após lesão óssea da tíbia mostra que essas
+recomendações são de evidência fraca (nível IV) e que a "regra dos 10%"
+semanal não é generalizável.
+
+Os degraus do Warden são saltos grandes por sessão (3 → 6 min de trote é
++100%), o que conflita com o achado de Frandsen. O projeto combina os dois
+(decisão do usuário, 2026-10):
+- **Estrutura do Warden:** 3 sessões por semana, em dias alternados, todas
+  iguais: 3 blocos de 10 min de caminhada + trote.
+- **Progressão 1x por semana:** o degrau só muda de uma semana para a
+  outra, nunca entre sessões da mesma semana.
+- **Teto de 10% no trote total da semana** sobre a semana anterior
+  (medido pelo Garmin, sem contar atividades classificadas como Caminhada).
+  O primeiro degrau (1 min de trote por bloco) é o piso: começar do zero
+  não tem razão a respeitar.
+- **Dor (regra do protocolo, mais rígida que o guardrail geral):**
+  qualquer dor registrada (>= 1) na semana volta um degrau; só sobe com dor
+  0 registrada em todas as sessões com trote; sessão sem dor registrada
+  repete o degrau.
+- **Fim da retomada:** quando houve sessão com ~30 min de trote (95%) nos
+  últimos 30 dias. Daí em diante vale o regime normal (teto por sessão +
+  ACWR). A etapa 2 do Warden (30 min contínuos com ritmo subindo de 50% a
+  100%) e a etapa 3 (dias consecutivos) não são reproduzidas: a regra de
+  alternância do projeto já proíbe dias seguidos, e a intensidade fica a
+  cargo das regras de composição da semana.
+
+A estrutura de cada sessão é calculada em Python (`_estado_retomada`) e
+fixada no plano depois da geração (`_aplicar_retomada`) -- o LLM escolhe
+os dias e escreve o motivo, não os números. No relógio, a sessão vai como
+grupo de repetição de caminhada (passo de recuperação) + trote (intervalo),
+não como "Rodagem 30 min" (`treino_garmin._passos_retomada`).
+
+**Fontes:** [Frandsen et al. 2025 (BJSM)](https://pure.au.dk/portal/en/publications/how-much-running-is-too-much-identifying-high-risk-running-sessio/) · [comentário dos autores no blog do BJSM](https://blogs.bmj.com/bjsm/?p=11751) · [programa graduado adaptado de Warden et al. (BJSM)](https://blogs.bmj.com/bjsm/files/2019/05/Table-D-Graded-Return-to-Run-Program-for-Bone-Stress-Injury-adapted-from-Warden-et-al-2016.pdf) · [George et al., revisão de escopo de retomada após lesão óssea da tíbia](https://openrepository.aut.ac.nz/items/f860af5b-29f1-4c1d-a981-6aecc825cc55/full) · [Nielsen et al. 2014 (JOSPT)](https://vbn.aau.dk/da/publications/excessive-progression-in-weekly-running-distance-and-risk-of-runn)
+
 **Por que semanal e não diário:** o relatório roda 1x por semana (domingo).
 Uma janela diária de 7/28 dias exigiria uma "espinha" de todos os dias do
 calendário (inclusive dias sem corrida, contando como zero) só pra
@@ -564,9 +649,13 @@ Prompt também lê a aba "Observações" (`_observacoes_recentes`) -- texto
 livre por semana, 100% preenchido pelo usuário, nunca escrito pelo
 script, mesma janela de 4 semanas dos outros dados.
 
-Dois guardrails determinísticos em Python, não uma aposta em o modelo
-perceber sozinho: `_instrucao_guardrail_acwr` (carga semanal agregada,
-só dispara acima de 1.3, nunca pra ACWR baixo) e
+Guardrails determinísticos em Python, não uma aposta em o modelo
+perceber sozinho, em dois regimes de carga: em retomada,
+`_instrucao_retomada` (protocolo de Warden com progressão semanal de no
+máximo 10%, ver "Retomada pós-canelite" na seção 6.1); fora dela,
+`_instrucao_teto_sessao` (sessão até 110% da mais longa dos últimos 30
+dias, Frandsen et al. 2025) e `_instrucao_guardrail_acwr` (ACWR em km
+corridos, só dispara acima de 1.3, nunca pra ACWR baixo). Em ambos,
 `_instrucao_guardrail_dor` (progressão sessão a sessão -- trava
 intensidade se a dor mais recente registrada foi >= 2, protocolo de
 retomada pós-canelite, seção 6.1). `REGRAS_COMPOSICAO_SEMANA`

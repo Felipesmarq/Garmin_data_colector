@@ -64,7 +64,7 @@ CABECALHO_ATIVIDADES = [RENOMEAR_CABECALHO.get(c, c) for c in COLUNAS_ATIVIDADES
 ABA_RESUMO_SEMANAL = "Resumo Semanal"
 COR_RESUMO_SEMANAL = (0.20, 0.55, 0.36)  # verde
 CABECALHO_RESUMO_SEMANAL = [
-    "semana_inicio", "km_total", "duracao_total_min", "num_atividades",
+    "semana_inicio", "km_total", "km_corridos", "duracao_total_min", "num_atividades",
     "variacao_pct_km_vs_semana_anterior", "carga_cronica_km", "acwr",
     "sono_score_medio", "fc_repouso_media",
 ]
@@ -151,6 +151,7 @@ FORMATADORES = {
     "efeito_treino_aerobico": partial(_numero, casas=1),
     "classificacao_atividade": partial(_traduzir, dicionario=TRADUCAO_CLASSIFICACAO),
     "km_total": partial(_numero, casas=2, remover_zero_a_direita=True),
+    "km_corridos": partial(_numero, casas=2, remover_zero_a_direita=True),
     "duracao_total_min": partial(_numero, casas=1, remover_zero_a_direita=True),
     "variacao_pct_km_vs_semana_anterior": _percentual,
     "carga_cronica_km": partial(_numero, casas=2, remover_zero_a_direita=True),
