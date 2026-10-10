@@ -540,7 +540,7 @@ Autenticação via service account do Google Cloud
 
 ### Fase 7 — Análise com IA (`analyze/analisar_com_ia.py`)
 **Requisitos:** chamada à API Gemini (`google-genai`, modelo
-`gemini-3.5-flash` configurável via `GEMINI_MODEL`) a partir de
+`gemini-3.8-flash` configurável via `GEMINI_MODEL`) a partir de
 `vw_sessoes_ia` (últimas `JANELA_SEMANAS` = 4 semanas, mesma unidade da
 carga crônica do ACWR) + `vw_resumo_semanal`; chamada ao LLM isolada numa
 função única (`gerar_analise(prompt) -> texto`) para permitir trocar de

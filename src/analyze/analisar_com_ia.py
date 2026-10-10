@@ -51,7 +51,7 @@ from src.planilha import conectar as conectar_planilha, inserir_linhas, inserir_
 ROOT = Path(__file__).resolve().parent.parent.parent
 
 JANELA_SEMANAS = 4
-MODELO_PADRAO = "gemini-3.5-flash"
+MODELO_PADRAO = "gemini-3.8-flash"
 
 # Fase 10 -- teto de tokens do prompt, bem abaixo do limite real do Gemini
 # (até 1M) -- ver gerar_analise().

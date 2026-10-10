@@ -107,7 +107,7 @@ com as duas primeiras linhas e ir completando.
 | `GOOGLE_SHEETS_CREDENTIALS_PATH` | Caminho do JSON da conta de serviço | Já vem preenchido no `.env.example` (`.google_sheets_credentials.json`). O arquivo você gera no passo a passo da [Fase 6](#fase-6--planilha-google-sheets-dor--dashboard-de-desempenho) | Fase 6 |
 | `GOOGLE_SHEET_ID` | Qual planilha usar | Crie uma planilha no Google Sheets e copie da URL o trecho entre `/d/` e `/edit`. Compartilhe a planilha, como **Editor**, com o `client_email` do JSON da conta de serviço | Fase 6 |
 | `GEMINI_API_KEY` | Gerar o plano semanal | Em [aistudio.google.com/apikey](https://aistudio.google.com/apikey), com sua conta Google | Fase 7 |
-| `GEMINI_MODEL` | Modelo do Gemini | Opcional. Sem ele, usa `gemini-3.5-flash` | Fase 7 (opcional) |
+| `GEMINI_MODEL` | Modelo do Gemini | Opcional. Sem ele, usa `gemini-3.8-flash` | Fase 7 (opcional) |
 | `EMAIL_REMETENTE` | Conta que envia o plano e os lembretes | Um endereço **Gmail** seu (o envio é fixo em `smtp.gmail.com`) | Fase 7 |
 | `EMAIL_SENHA_APP` | Senha de app do Gmail | Em [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords). Exige a verificação em 2 etapas ativada na conta. Não é a senha normal do Gmail | Fase 7 |
 | `EMAIL_DESTINATARIO` | Quem recebe os e-mails | Opcional. Sem ele, vai pro próprio `EMAIL_REMETENTE` | Fase 7 (opcional) |
