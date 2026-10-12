@@ -1,20 +1,24 @@
 name: Análise semanal
 
-# Roda domingo à noite (Fase 8 -- ver docs/CASE_DO_PROJETO_1.md seção 7). O job
+# Roda domingo de manhã (Fase 8 -- ver docs/CASE_DO_PROJETO_1.md seção 7). O job
 # "sync" chama sync_atividades.yml como reusable workflow (workflow_call) em
 # vez de duplicar os mesmos 4 passos de carga de dado -- isso também resolve
 # o problema de a análise pegar dado desatualizado por coincidência de
 # horário: ela sincroniza na própria execução, não depende do cron diário já
 # ter rodado antes.
-# 20h BRT domingo = 23h UTC domingo (dia da semana não muda de UTC-3 pra UTC
-# nesse horário, diferente do sync diário).
+# 6h BRT domingo = 9h UTC (2h da manhã no Pacífico): fora do pico de uso da
+# API do Gemini, que é quando o 503 "high demand" mais aparece (ver
+# docs/CASE_DO_PROJETO_1.md, 2026-10). O plano é da semana que começa no
+# próprio domingo. 10h BRT = reserva, ainda fora do pico: se o das 6h deu
+# certo, o script vê a semana já escrita e sai sem fazer nada.
 on:
   schedule:
-    - cron: "0 23 * * 0"
+    - cron: "0 9 * * 0"
+    - cron: "0 13 * * 0"
   workflow_dispatch:
     inputs:
       semana:
-        description: "Semana a planejar (atual = reexecução quando o cron falhou e a semana já começou)"
+        description: "Semana a planejar (atual = a semana já começada, quando o cron falhou; dias passados viram descanso)"
         type: choice
         options: [proxima, atual]
         default: proxima

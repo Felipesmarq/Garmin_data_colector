@@ -66,7 +66,9 @@ TETO_TOKENS = 200_000
 # abortar, sem cair num plano de fallback fixo -- ver __main__.
 MAX_TENTATIVAS_REVISAO = 3
 
-DIAS_SEMANA_PT = ["Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado", "Domingo"]
+# A semana do plano vai de domingo a sábado (o cron roda domingo às 6h, ver
+# analise_semanal.yml) -- não é a semana ISO.
+DIAS_SEMANA_PT = ["Domingo", "Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado"]
 
 # O repositório é público, e com ele os logs do GitHub Actions. No Actions, o
 # log não mostra conteúdo de saúde (plano com os motivos, nível de dor,
@@ -119,7 +121,7 @@ TIPOS_DE_TREINO = """\
 
 
 class TreinoDia(BaseModel):
-    dia_semana: str  # "Segunda".."Domingo", só pra o modelo se situar -- a data real é atribuída em Python (_semana_alvo), nunca confiada ao LLM
+    dia_semana: str  # "Domingo".."Sábado", só pra o modelo se situar -- a data real é atribuída em Python (_semana_alvo), nunca confiada ao LLM
     descanso: bool
     tipo_treino: str | None = None  # da lista TIPOS_DE_TREINO, ou None se descanso
     distancia_km: float | None = None
@@ -156,25 +158,33 @@ class RevisaoCoerencia(BaseModel):
 
 
 def _semana_alvo() -> list[date]:
-    """Segunda a domingo da semana a planejar -- calculado em Python, não
+    """Domingo a sábado da semana a planejar -- calculado em Python, não
     pedido ao LLM (aritmética de data não é trabalho pra prompt).
 
-    Por padrão é a próxima semana ISO (o cron roda no domingo à noite). A
-    variável de ambiente SEMANA_PLANO=atual muda pra semana ISO corrente:
-    serve pra reexecução manual quando o cron falhou e a semana já começou
-    (ver workflow_dispatch em analise_semanal.yml).
+    Por padrão é a semana que começa no próximo domingo -- o próprio dia,
+    quando roda no domingo (o cron roda domingo às 6h, planejando a semana
+    que começa ali). A variável de ambiente SEMANA_PLANO=atual muda pra
+    semana já começada (domingo mais recente): serve pra reexecução manual
+    quando o cron falhou (ver workflow_dispatch em analise_semanal.yml); os
+    dias que já passaram viram descanso (ver _dias_passados).
 
-    `hoje_brt()`, não `date.today()`: essa conta roda no domingo à noite,
-    e um atraso de agendamento no cron (comum no GitHub Actions) pode
-    empurrar a execução pra depois da meia-noite UTC -- `date.today()`
-    já seria segunda-feira ali, e a conta pularia a semana inteira (bug
-    real, ver CASE_DO_PROJETO_1.md seção 11)."""
+    `hoje_brt()`, não `date.today()`: o servidor do GitHub Actions roda em
+    UTC, e um atraso de agendamento no cron (comum no GitHub Actions) já
+    pulou a semana inteira uma vez (bug real, ver CASE_DO_PROJETO_1.md
+    seção 11)."""
     hoje = hoje_brt()
     if os.environ.get("SEMANA_PLANO") == "atual":
-        segunda = hoje - timedelta(days=hoje.weekday())
+        domingo = hoje - timedelta(days=(hoje.weekday() + 1) % 7)
     else:
-        segunda = hoje + timedelta(days=7 - hoje.weekday())
-    return [segunda + timedelta(days=i) for i in range(7)]
+        domingo = hoje + timedelta(days=(6 - hoje.weekday()) % 7)
+    return [domingo + timedelta(days=i) for i in range(7)]
+
+
+def _dias_passados(dias: list[date]) -> list[date]:
+    """Dias da semana a planejar anteriores a hoje (só acontece com
+    SEMANA_PLANO=atual) -- têm que ser descanso no plano."""
+    hoje = hoje_brt()
+    return [d for d in dias if d < hoje]
 
 
 def _consultar(con: psycopg.Connection, sql: str, params: tuple = ()) -> tuple[list[str], list[tuple]]:
@@ -520,10 +530,10 @@ def _construir_prompt(
     partes = [
         "Você é o treinador de um corredor recreacional em retomada gradual após um "
         "episódio de canelite (síndrome do estresse tibial medial). Analise os dados "
-        "objetivos de treino (relógio Garmin) abaixo e monte o plano da próxima semana "
-        "de treino, como um treinador de verdade faria -- não uma sugestão genérica.",
+        "objetivos de treino (relógio Garmin) abaixo e monte o plano da semana de "
+        "treino, como um treinador de verdade faria -- não uma sugestão genérica.",
         "",
-        f"A próxima semana é: {dias_txt}.",
+        f"A semana a planejar é: {dias_txt}.",
         "",
         "Objetivo: um plano que marque evolução -- sem repetir o padrão de sobrecarga "
         "que já causou lesão antes. Evolução é o objetivo; não-sobrecarga é uma "
@@ -745,12 +755,14 @@ def _linhas_plano(plano: PlanoSemanal, dias: list[date]) -> list[tuple]:
 
 
 def plano_ja_escrito(spreadsheet, dias: list[date]) -> bool:
-    """A semana já tem plano na aba "Plano da Semana"? Critério: a
-    segunda-feira dela está na coluna `data` (o plano sempre escreve os 7
-    dias, inclusive descanso, então a segunda sempre existe)."""
+    """A semana já tem plano na aba "Plano da Semana"? Critério: os 7 dias
+    dela estão na coluna `data` (o plano sempre escreve os 7 dias, inclusive
+    descanso, num append só). Os 7, não só o primeiro: na troca da semana
+    de segunda-domingo pra domingo-sábado (2026-10), o domingo 11/10 já
+    estava no plano antigo e a semana nova seria tomada como escrita."""
     aba = obter_aba(spreadsheet, ABA_PLANO, CABECALHO_PLANO, cor=COR_PLANO)
     idx_data = CABECALHO_PLANO.index("data") + 1  # col_values é 1-based
-    return str(dias[0]) in set(aba.col_values(idx_data)[1:])
+    return {str(d) for d in dias} <= set(aba.col_values(idx_data)[1:])
 
 
 def escrever_plano(spreadsheet, plano: PlanoSemanal, dias: list[date]) -> int:
@@ -816,8 +828,8 @@ def escrever_dias_planejados(spreadsheet, plano: PlanoSemanal, dias: list[date],
     Upsert por `data`, não por `activity_id` (dia planejado não tem
     atividade associada ainda) -- idempotente: se qualquer dia dessa semana
     já tem linha de plano em "Atividades", não insere de novo. Checa
-    qualquer dia da semana, não só a segunda-feira (diferente de
-    escrever_plano) -- segunda pode ser dia de descanso, que nunca ganha
+    qualquer dia da semana, não só o domingo -- domingo pode ser dia de
+    descanso, que nunca ganha
     linha própria, então checar só ela nunca encontraria a semana já
     escrita e duplicaria a cada execução.
 
@@ -841,7 +853,7 @@ def escrever_dias_planejados(spreadsheet, plano: PlanoSemanal, dias: list[date],
     idx_data_real = COLUNAS_REAIS.index("data")
     linhas = []
     # mais recente primeiro (mesma convenção do resto da aba, ver
-    # escrever_atividades) -- dias já vem em ordem Segunda->Domingo, então
+    # escrever_atividades) -- dias já vem em ordem Domingo->Sábado, então
     # percorre de trás pra frente antes de inserir no topo.
     for treino, data in reversed(list(zip(plano.dias, dias))):
         if treino.descanso or str(data) in datas_com_status:

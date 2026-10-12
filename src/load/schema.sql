@@ -329,8 +329,8 @@ SELECT
 FROM vw_sessoes;
 
 -- =====================================================================
--- VIEW: vw_resumo_semanal — agregação por semana ISO (semana começa
--- segunda) + ACWR (Acute:Chronic Workload Ratio -- ver CASE_DO_PROJETO_1.md
+-- VIEW: vw_resumo_semanal — agregação por semana de domingo a sábado (a
+-- mesma semana do plano, ver analisar_com_ia._semana_alvo) + ACWR (Acute:Chronic Workload Ratio -- ver CASE_DO_PROJETO_1.md
 -- seção 6.1). Granularidade semanal (não diária) porque o relatório roda
 -- 1x/semana: carga aguda = km corridos da semana corrente, carga crônica =
 -- média das últimas 4 semanas (semana corrente + 3 anteriores). Zona
@@ -352,7 +352,7 @@ FROM vw_sessoes;
 CREATE OR REPLACE VIEW vw_resumo_semanal AS
 WITH semanal AS (
     SELECT
-        date_trunc('week', data)::date AS semana_inicio,
+        data - EXTRACT(DOW FROM data)::int AS semana_inicio,
         SUM(distancia_km)              AS km_total,
         SUM(duracao_min)               AS duracao_total_min,
         COUNT(activity_id)             AS num_atividades,

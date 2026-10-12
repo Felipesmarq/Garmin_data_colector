@@ -161,7 +161,7 @@ conforme aumenta contexto irrelevante no prompt — não é sobre limite de
 token (o Gemini tem 1M de contexto, sobra), é sobre qualidade do raciocínio
 piorar com ruído mesmo havendo espaço de sobra.
 
-**`vw_resumo_semanal` (view, como já era) — agregação por semana ISO:**
+**`vw_resumo_semanal` (view, como já era) — agregação por semana (domingo a sábado desde 2026-10; antes, semana ISO):**
 km total, tempo total, nº de atividades, **carga aguda (últimos 7 dias) e
 carga crônica (média móvel dos últimos 28 dias)** para cálculo do ACWR (ver
 seção 6.1), tendência de sono/FC repouso/body battery.
@@ -208,8 +208,9 @@ pra caber no ritmo do projeto.
 últimas 4 semanas de carga aguda (também janela móvel diária).
 
 **O que `vw_resumo_semanal` calcula (granularidade semanal, não diária):**
-- **Carga aguda** = km total da semana ISO corrente (coluna `km_total`).
-- **Carga crônica** = média do km total das últimas 4 semanas ISO — a
+- **Carga aguda** = km total da semana corrente (coluna `km_total`; domingo a
+  sábado desde 2026-10, e km corridos, ver revisão abaixo).
+- **Carga crônica** = média do km total das últimas 4 semanas — a
   semana corrente + as 3 anteriores:
   `AVG(km_total) OVER (ORDER BY semana_inicio ROWS BETWEEN 3 PRECEDING AND CURRENT ROW)`.
 - **ACWR** = carga aguda / carga crônica.
@@ -632,7 +633,7 @@ função única (`gerar_analise(prompt) -> texto`) para permitir trocar de
 provedor sem reescrever o resto -- devolve JSON validado contra o schema
 `PlanoSemanal` (`response_schema` do Gemini), não texto livre, pra dar
 pra inserir direto na planilha sem parsing frágil. Saída é o **plano da
-semana** (exatamente 7 dias, Segunda a Domingo, incluindo descanso;
+semana** (exatamente 7 dias, Domingo a Sábado desde 2026-10 -- antes Segunda a Domingo --, incluindo descanso;
 datas calculadas em Python via `_proxima_semana`, nunca confiadas ao
 LLM) -- usa o vocabulário fechado de `tipo_treino` (seção 6.1) tanto pro
 histórico quanto pra recomendação. Escrito na aba "Plano da Semana"
@@ -676,7 +677,7 @@ Python 3.12 -- decisão tomada nesta fase, ver seção 11; trocado por
 `astral-sh/setup-uv` numa sessão posterior, ver seção 11): `sync_atividades.yml`
 (diário, 21h BRT -- carrega atividades, recuperação, sincroniza dor via
 `load_dor.py` e atualiza o dashboard via `planilha_desempenho.py`, tudo
-no mesmo workflow) e `analise_semanal.yml` (domingo, 20h BRT -- resincroniza
+no mesmo workflow) e `analise_semanal.yml` (domingo, 6h BRT desde 2026-10, antes 20h -- resincroniza
 atividades/recuperação/dor na própria execução, não depende do horário
 do sync diário ter rodado antes, e gera o plano via `analisar_com_ia.py`).
 Cada passo usa `nick-fields/retry` (até 3 tentativas) antes de falhar de

@@ -11,8 +11,8 @@ do negócio) está em [`docs/`](docs/index.md).
 **Na rotina, tudo é automático.** Dois workflows do GitHub Actions executam
 o pipeline inteiro sem nenhum comando seu: todo dia às 21h (horário de
 Brasília) as atividades são sincronizadas e a planilha atualizada, e todo
-domingo às 20h o plano da semana é gerado, gravado na planilha, enviado por
-e-mail e agendado no relógio.
+domingo às 6h o plano da semana (domingo a sábado) é gerado, gravado na
+planilha, enviado por e-mail e agendado no relógio.
 
 **Os comandos `docker compose` deste README são só pra teste local**, um
 passo de cada vez (cada script do pipeline roda isolado, como um
@@ -270,7 +270,8 @@ de `uv.lock` direto no runner):
 - **`sync_atividades.yml`** — todo dia, 21h BRT (`0 0 * * *` UTC): carrega
   atividades, recuperação, sincroniza dor e atualiza o dashboard da
   planilha.
-- **`analise_semanal.yml`** — domingo, 20h BRT (`0 23 * * 0` UTC): resincroniza
+- **`analise_semanal.yml`** — domingo, 6h BRT (`0 9 * * 0` UTC), com reserva às
+  10h BRT (`0 13 * * 0`) que não faz nada se o plano já saiu: resincroniza
   atividades/recuperação/dor (não depende do horário do sync diário ter
   rodado antes) e gera o plano da semana.
 
@@ -327,7 +328,7 @@ enquanto -- não influencia a geração do plano seguinte.
 ```
 ├── .github/workflows/
 │   ├── sync_atividades.yml     # diário, 21h BRT -- atividades + recuperação + dor + dashboard
-│   └── analise_semanal.yml     # domingo, 20h BRT -- resync + plano da semana via Gemini
+│   └── analise_semanal.yml     # domingo, 6h BRT -- resync + plano da semana via Gemini
 ├── explore/                    # scripts de investigação (Fase 0, fora do pipeline final)
 │   ├── inspect_garmin.py
 │   ├── output/                 # JSON bruto de amostra (gitignored)
