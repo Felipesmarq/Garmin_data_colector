@@ -97,17 +97,28 @@ def _duracao_estimada_seg(dia, extra_seg: int) -> int:
     return int(dia.distancia_km * pace * 60) + extra_seg
 
 
-def _passos_retomada(retomada) -> list:
+def _passo_trote(segundos: int, ordem: int, pace_alvo: str | None):
+    """Trecho de trote com alvo de pace (o relógio avisa na hora se sair da
+    faixa) -- pace, não FC: num trote de 1-2 min a FC não sobe a tempo."""
+    alvo = _alvo_pace(pace_alvo)
+    tipo, valores = alvo if alvo else (None, {})
+    passo = create_interval_step(segundos, ordem, tipo)
+    for campo, valor in valores.items():
+        setattr(passo, campo, valor)
+    return passo
+
+
+def _passos_retomada(retomada, pace_alvo: str | None) -> list:
     """Sessão de retomada (protocolo de Warden): caminhada como passo de
-    recuperação e trote como intervalo, repetidos em bloco -- sem isso o
-    relógio mostraria "Rodagem 30 min" e o natural seria correr os 30 min
-    seguidos. Sem alvo de pace/FC, como toda Rodagem/Recuperação."""
+    recuperação (sem alvo) e trote como intervalo com alvo de pace,
+    repetidos em bloco -- sem isso o relógio mostraria "Rodagem 30 min" e o
+    natural seria correr os 30 min seguidos."""
     if retomada.trote_seg == 0:
         return [create_recovery_step(retomada.caminhada_seg, 1)]
     if retomada.caminhada_seg == 0:
-        return [create_interval_step(retomada.trote_seg, 1)]
+        return [_passo_trote(retomada.trote_seg, 1, pace_alvo)]
     caminhada = create_recovery_step(retomada.caminhada_seg, 2)
-    trote = create_interval_step(retomada.trote_seg, 3)
+    trote = _passo_trote(retomada.trote_seg, 3, pace_alvo)
     return [create_repeat_group(retomada.blocos, [caminhada, trote], 1)]
 
 
@@ -135,7 +146,7 @@ def construir_treino(dia, data: date, retomada=None) -> RunningWorkout | None:
         return None
     if retomada is not None:
         duracao = retomada.blocos * (retomada.caminhada_seg + retomada.trote_seg)
-        return _treino(dia, data, _passos_retomada(retomada), duracao)
+        return _treino(dia, data, _passos_retomada(retomada, dia.pace_alvo), duracao)
     if not dia.distancia_km and not dia.duracao_min:
         return None
 

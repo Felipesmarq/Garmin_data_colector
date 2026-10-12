@@ -99,6 +99,16 @@ RETOMADA_BLOCO_SEG = 10 * 60
 RETOMADA_TROTE_INICIAL_SEG = 60  # 1º degrau do Warden: caminha 9 min / trota 1 min
 RETOMADA_AUMENTO_SEMANAL = 0.10
 RETOMADA_PASSO_SEG = 5  # trote por bloco arredondado pra baixo em múltiplos de 5s
+# Referências do trote na retomada, do próprio corredor (não tabela genérica):
+# pace = mediana do pace dos trechos de corrida (RWD_RUN) das sessões de
+# Rodagem/Recuperação recentes, arredondada pra baixo em 15s, com 30s de
+# folga pro lado lento; FC = teto de "Easy" do Daniels (78% da FC máxima já
+# registrada). O pace vira alvo do trecho de trote no relógio; a FC fica só
+# no plano (no trote de 1-2 min ela não chega a subir a tempo de avisar).
+JANELA_REFERENCIA_TROTE_DIAS = 180
+TROTE_MIN_SEG_REFERENCIA = 120  # sessão com menos trote que isso não serve de referência de pace
+FOLGA_PACE_TROTE_MIN = 0.5
+FC_TETO_FRACAO_MAX = 0.78
 # Fim da retomada: alguma sessão com ~30 min de trote nos últimos 30 dias.
 RETOMADA_FIM_TROTE_SEG = 0.95 * RETOMADA_BLOCOS * RETOMADA_BLOCO_SEG
 # Regra de dor do protocolo: qualquer dor registrada volta um degrau.
@@ -304,6 +314,20 @@ class SessaoRetomada(BaseModel):
     blocos: int
     caminhada_seg: int  # por bloco
     trote_seg: int  # por bloco; 0 = sessão só de caminhada
+    pace_trote: tuple[float, float] | None = None  # min/km decimais (rápido, lento)
+    fc_teto: int | None = None
+
+    def texto_pace(self) -> str | None:
+        """'8:15-8:45 min/km no trote' -- o "no trote" faz a resolução do
+        planejado x realizado ignorar o pace (o pace médio da sessão inclui
+        a caminhada, ver planilha_desempenho._resolver_dia)."""
+        if self.trote_seg == 0 or self.pace_trote is None:
+            return None
+        rapido, lento = self.pace_trote
+        return f"{_pace_txt(rapido)}-{_pace_txt(lento)} min/km no trote"
+
+    def texto_fc(self) -> str | None:
+        return f"até {self.fc_teto} bpm" if self.fc_teto else None
 
     @property
     def duracao_min(self) -> float:
@@ -342,12 +366,36 @@ class Retomada(BaseModel):
     trote_max_bloco: int  # teto de trote por bloco (sessão)
     trote_max_semana_seg: float | None  # teto do trote total da semana; None = sem teto (1º degrau)
     decisao: str  # por que o degrau subiu, repetiu ou voltou
+    pace_trote: tuple[float, float] | None = None  # ver _referencias_trote
+    fc_teto: int | None = None
 
     def sessao(self, n: int) -> SessaoRetomada:
         trote = self.trote_max_bloco
         if self.trote_max_semana_seg is not None and n > 0:
             trote = min(trote, _arredondar_trote(self.trote_max_semana_seg / (n * RETOMADA_BLOCOS)))
-        return _montar_sessao(trote)
+        return _montar_sessao(trote).model_copy(update={"pace_trote": self.pace_trote, "fc_teto": self.fc_teto})
+
+
+def _referencias_trote(con: psycopg.Connection, hoje: date) -> tuple[tuple[float, float] | None, int | None]:
+    """(faixa de pace do trote, teto de FC) a partir do histórico real --
+    ver JANELA_REFERENCIA_TROTE_DIAS. None no que não houver dado."""
+    _, linhas = _consultar(
+        con,
+        "SELECT SUM(s.duracao_seg) / 60 / NULLIF(SUM(s.distancia_m) / 1000, 0) "
+        "FROM stg_atividade_splits s JOIN vw_sessoes v USING (activity_id) "
+        "WHERE s.tipo = 'RWD_RUN' AND v.tipo_treino = 'Rodagem/Recuperação' AND v.data >= %s "
+        "GROUP BY s.activity_id HAVING SUM(s.duracao_seg) >= %s",
+        (hoje - timedelta(days=JANELA_REFERENCIA_TROTE_DIAS), TROTE_MIN_SEG_REFERENCIA),
+    )
+    paces = sorted(float(l[0]) for l in linhas if l[0] is not None)
+    pace = None
+    if paces:
+        mediana = paces[len(paces) // 2]
+        rapido = int(mediana * 4) / 4  # arredonda pra baixo em 15s
+        pace = (rapido, rapido + FOLGA_PACE_TROTE_MIN)
+    _, linhas = _consultar(con, "SELECT MAX(fc_maxima) FROM vw_sessoes WHERE data >= %s", (hoje - timedelta(days=365),))
+    fc_max = linhas[0][0] if linhas else None
+    return pace, (round(float(fc_max) * FC_TETO_FRACAO_MAX) if fc_max else None)
 
 
 def _sessoes_antes_de(con: psycopg.Connection, inicio_semana: date) -> list[tuple]:
@@ -423,6 +471,10 @@ def _max_sessoes(dias_livres: int) -> int:
 
 
 def _instrucao_retomada(r: Retomada, max_sessoes: int) -> str:
+    s = r.sessao(1)
+    referencias = ", ".join(
+        t for t in (s.texto_pace() and f"pace {s.texto_pace()}", s.texto_fc() and f"FC {s.texto_fc()}") if t
+    ) or "sem histórico de trote suficiente"
     opcoes = "; ".join(
         f"{n} sessão(ões): {r.sessao(n).descricao()} ({r.sessao(n).duracao_min:.0f} min)"
         for n in range(1, max_sessoes + 1)
@@ -434,8 +486,9 @@ def _instrucao_retomada(r: Retomada, max_sessoes: int) -> str:
         f"{max_sessoes}, em dias alternados, nunca seguidos). Todas as sessões da semana são "
         f"iguais, e a estrutura de cada uma depende só do número de sessões, porque o trote "
         f"total da semana tem teto: {opcoes}. Degrau desta semana: {r.decisao}. Cada sessão é "
-        f"Rodagem/Recuperação com a duracao_min da opção escolhida, distancia_km, pace_alvo e "
-        f"fc_alvo nulos: o trote é bem leve, conversável. Nenhum outro tipo de treino (nem "
+        f"Rodagem/Recuperação com a duracao_min da opção escolhida e distancia_km nulo; "
+        f"pace_alvo e fc_alvo são preenchidos depois, a partir do histórico dele ({referencias}). "
+        f"O trote é bem leve, conversável. Nenhum outro tipo de treino (nem "
         f"Longão, nem intensidade). Explique no motivo que, se doer durante, depois ou no dia "
         f"seguinte, ele para, registra a dor e faz as sessões seguintes da semana só "
         f"caminhando. O ACWR da tabela não se aplica durante a retomada -- o controle de "
@@ -506,9 +559,10 @@ def _aplicar_retomada(plano: "PlanoSemanal", r: Retomada) -> SessaoRetomada:
         dia.tipo_treino = "Rodagem/Recuperação"
         dia.distancia_km = None
         dia.duracao_min = sessao.duracao_min
-        dia.pace_alvo = None
-        dia.fc_alvo = None
-        dia.motivo = f"{sessao.descricao()} -- {dia.motivo}"
+        dia.pace_alvo = sessao.texto_pace()
+        dia.fc_alvo = sessao.texto_fc()
+        guia = ", ".join(t for t in (dia.pace_alvo, dia.fc_alvo and f"FC {dia.fc_alvo}") if t)
+        dia.motivo = f"{sessao.descricao()}{f' ({guia})' if guia else ''} -- {dia.motivo}"
     return sessao
 
 
@@ -1032,6 +1086,9 @@ if __name__ == "__main__":
 
     sessoes = _sessoes_antes_de(con, dias[0])
     retomada = _estado_retomada(sessoes, dias[0])
+    if retomada:
+        pace_trote, fc_teto = _referencias_trote(con, hoje_brt())
+        retomada = retomada.model_copy(update={"pace_trote": pace_trote, "fc_teto": fc_teto})
     teto_km = None if retomada else _teto_sessao_km(sessoes)
     acwr_atual = _acwr_semana_atual(colunas_resumo, linhas_resumo)
     dor_recente = _dor_mais_recente(colunas_ativ, linhas_ativ)

@@ -225,10 +225,13 @@ def _parse_faixa_pace(texto: str) -> tuple[float, float] | None:
 
 
 def _parse_faixa_fc(texto: str) -> tuple[int, int] | None:
-    """'123-133 bpm' (ou só '130 bpm') -> (min, max)."""
+    """'123-133 bpm' (ou só '130 bpm') -> (min, max). 'até 150 bpm' (teto da
+    retomada) -> (0, 150): só reprova acima."""
     valores = [int(v) for v in re.findall(r"\d+", texto or "")]
     if not valores:
         return None
+    if "até" in (texto or "").lower():
+        return (0, max(valores))
     return (min(valores), max(valores))
 
 
@@ -280,7 +283,9 @@ def _resolver_dia(
         aprovado = _dentro_margem_percentual(distancia_planejada, distancia_real, MARGEM_DISTANCIA_DURACAO)
     if aprovado and duracao_planejada is not None and duracao_real is not None:
         aprovado = _dentro_margem_percentual(duracao_planejada, duracao_real, MARGEM_DISTANCIA_DURACAO)
-    if aprovado:
+    # pace "no trote" (retomada) é do trecho de trote, não da sessão: o pace
+    # médio da sessão inclui a caminhada e sempre sairia da faixa.
+    if aprovado and "trote" not in (pace_planejado_txt or "").lower():
         aprovado = _dentro_faixa_com_margem(_parse_faixa_pace(pace_planejado_txt), pace_real, MARGEM_PACE_MIN_KM)
     if aprovado:
         aprovado = _dentro_faixa_com_margem(_parse_faixa_fc(fc_planejado_txt), fc_real, MARGEM_FC_BPM)

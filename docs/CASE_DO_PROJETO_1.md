@@ -298,6 +298,19 @@ Os degraus do Warden são saltos grandes por sessão (3 → 6 min de trote é
   alternância do projeto já proíbe dias seguidos, e a intensidade fica a
   cargo das regras de composição da semana.
 
+**Pace e FC do trote (provisório, 2026-10-12):** a primeira versão não
+dava alvo nenhum na retomada, e o corredor ficou sem referência. Hoje é
+determinístico (`_referencias_trote`): pace = mediana do pace dos trechos
+de corrida (RWD_RUN) das sessões de Rodagem/Recuperação dos últimos 180
+dias, arredondada pra baixo em 15s, com 30s de folga pro lado lento; FC =
+teto de 78% da FC máxima registrada (limite de "Easy" do Daniels). No
+relógio, só o pace vira alvo, no trecho de trote: num trote de 1-2 min a
+FC não sobe a tempo de avisar. A resolução planejado x realizado ignora o
+pace "no trote" (o pace médio da sessão inclui a caminhada) e trata
+"até N bpm" como teto. **Pendente:** o usuário quer que o pace e a FC
+sejam decididos pela IA, analisando a evolução dele e prevendo a semana
+seguinte -- o cálculo fixo é só pra semana de 11-17/10.
+
 A estrutura de cada sessão é calculada em Python (`_estado_retomada`) e
 fixada no plano depois da geração (`_aplicar_retomada`) -- o LLM escolhe
 os dias e escreve o motivo, não os números. No relógio, a sessão vai como
