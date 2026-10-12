@@ -36,7 +36,7 @@ import gspread
 import psycopg
 from dotenv import load_dotenv
 from google import genai
-from google.genai import types
+from google.genai import errors, types
 from pydantic import BaseModel
 
 from src.db import conectar
@@ -57,6 +57,13 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 
 JANELA_SEMANAS = 4
 MODELO_PADRAO = "gemini-3.8-flash"
+
+# Sobrecarga do Gemini (503 "high demand") é por modelo e dura mais que as
+# 5 tentativas que o SDK já faz sozinho -- então, esgotadas elas, tenta o
+# próximo modelo da lista em vez de desistir (ver _gerar_json e
+# CASE_DO_PROJETO_1.md, 2026-10). 429 entra junto: a cota também é por modelo.
+MODELOS_RESERVA = ("gemini-3.7-flash", "gemini-3.6-flash")
+CODIGOS_SOBRECARGA = (429, 500, 502, 503, 504)
 
 # Fase 10 -- teto de tokens do prompt, bem abaixo do limite real do Gemini
 # (até 1M) -- ver gerar_analise().
@@ -597,11 +604,12 @@ def _construir_prompt(
     return "\n".join(partes)
 
 
-def _cliente_gemini() -> tuple[genai.Client, str]:
+def _modelos() -> list[str]:
+    """Modelo principal (GEMINI_MODEL, ou MODELO_PADRAO) e depois os de
+    reserva, sem repetir."""
     load_dotenv(ROOT / ".env")
-    cliente = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-    modelo = os.environ.get("GEMINI_MODEL", MODELO_PADRAO)
-    return cliente, modelo
+    principal = os.environ.get("GEMINI_MODEL") or MODELO_PADRAO
+    return [principal] + [m for m in MODELOS_RESERVA if m != principal]
 
 
 def _verificar_teto_tokens(cliente: genai.Client, modelo: str, texto: str) -> None:
@@ -618,37 +626,56 @@ def _verificar_teto_tokens(cliente: genai.Client, modelo: str, texto: str) -> No
         )
 
 
+def _gerar_json(conteudo: str, schema: type[BaseModel], o_que: str) -> str:
+    """Chamada ao Gemini com saída estruturada (`response_schema`), passando
+    pro próximo modelo de `_modelos()` quando o atual está sobrecarregado
+    (CODIGOS_SOBRECARGA, depois das tentativas do próprio SDK). Bloqueio ou
+    resposta incompleta não troca de modelo: é problema do prompt, não de
+    capacidade."""
+    cliente = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    ultimo_erro: errors.APIError | None = None
+    for modelo in _modelos():
+        try:
+            _verificar_teto_tokens(cliente, modelo, conteudo)
+            resposta = cliente.models.generate_content(
+                model=modelo,
+                contents=conteudo,
+                config=types.GenerateContentConfig(
+                    # não usamos tools/function calling -- desliga o AFC padrão pra
+                    # não gerar o aviso "Direct use of AFC..." a cada chamada, sem
+                    # efeito nenhum no resultado.
+                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+                    response_mime_type="application/json",
+                    response_schema=schema,
+                ),
+            )
+        except errors.APIError as erro:
+            if erro.code not in CODIGOS_SOBRECARGA:
+                raise
+            print(f"[Gemini: {modelo} indisponível ({erro.code}) para {o_que}, tentando o próximo modelo]")
+            ultimo_erro = erro
+            continue
+        if not resposta.candidates:
+            motivo = resposta.prompt_feedback.block_reason if resposta.prompt_feedback else "desconhecido"
+            raise RuntimeError(f"Gemini bloqueou o prompt de {o_que} (motivo: {motivo}).")
+        finalizacao = resposta.candidates[0].finish_reason
+        if finalizacao not in (types.FinishReason.STOP, None) or not resposta.text:
+            raise RuntimeError(f"Gemini não completou {o_que} (finish_reason={finalizacao}).")
+        print(f"[{o_que}: {modelo}]")
+        return resposta.text
+    raise ultimo_erro
+
+
 def gerar_analise(prompt: str) -> str:
     """Chamada ao LLM isolada nesta função -- ver docstring do módulo.
 
     Devolve texto (contrato genérico, ver seção 4 do case) -- só que aqui
     esse texto é um JSON validado contra PlanoSemanal (response_schema),
-    não texto livre. `response_schema` é config específica do Gemini; fica
-    contida nesta função, então trocar de provedor continua sendo só
-    reescrever `gerar_analise`.
+    não texto livre. `response_schema` e a troca de modelo por sobrecarga
+    são específicos do Gemini; ficam contidos em `_gerar_json`, então trocar
+    de provedor continua sendo só reescrever essas duas funções.
     """
-    cliente, modelo = _cliente_gemini()
-    _verificar_teto_tokens(cliente, modelo, prompt)
-
-    resposta = cliente.models.generate_content(
-        model=modelo,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            # não usamos tools/function calling -- desliga o AFC padrão pra
-            # não gerar o aviso "Direct use of AFC..." a cada chamada, sem
-            # efeito nenhum no resultado.
-            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-            response_mime_type="application/json",
-            response_schema=PlanoSemanal,
-        ),
-    )
-    if not resposta.candidates:
-        motivo = resposta.prompt_feedback.block_reason if resposta.prompt_feedback else "desconhecido"
-        raise RuntimeError(f"Gemini bloqueou o prompt antes de gerar resposta (motivo: {motivo}).")
-    finalizacao = resposta.candidates[0].finish_reason
-    if finalizacao not in (types.FinishReason.STOP, None) or not resposta.text:
-        raise RuntimeError(f"Gemini não completou a resposta (finish_reason={finalizacao}).")
-    return resposta.text
+    return _gerar_json(prompt, PlanoSemanal, "geração do plano")
 
 
 def _construir_prompt_revisao(prompt_original: str, plano_texto: str) -> str:
@@ -690,26 +717,8 @@ def revisar_coerencia(prompt_original: str, plano_texto: str) -> RevisaoCoerenci
     entrada e violação de guardrail que tenha escapado da restrição de
     vocabulário. Recebe o prompt original (que já contém os dados e as
     instruções de guardrail que dispararam, se algum) + o plano gerado."""
-    cliente, modelo = _cliente_gemini()
     prompt_revisao = _construir_prompt_revisao(prompt_original, plano_texto)
-    _verificar_teto_tokens(cliente, modelo, prompt_revisao)
-
-    resposta = cliente.models.generate_content(
-        model=modelo,
-        contents=prompt_revisao,
-        config=types.GenerateContentConfig(
-            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-            response_mime_type="application/json",
-            response_schema=RevisaoCoerencia,
-        ),
-    )
-    if not resposta.candidates:
-        motivo = resposta.prompt_feedback.block_reason if resposta.prompt_feedback else "desconhecido"
-        raise RuntimeError(f"Gemini bloqueou o prompt de revisão (motivo: {motivo}).")
-    finalizacao = resposta.candidates[0].finish_reason
-    if finalizacao not in (types.FinishReason.STOP, None) or not resposta.text:
-        raise RuntimeError(f"Gemini não completou a revisão (finish_reason={finalizacao}).")
-    return RevisaoCoerencia.model_validate_json(resposta.text)
+    return RevisaoCoerencia.model_validate_json(_gerar_json(prompt_revisao, RevisaoCoerencia, "revisão de coerência"))
 
 
 def _plano_semanal(texto_json: str) -> PlanoSemanal:

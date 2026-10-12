@@ -326,6 +326,56 @@ seguinte quando ACWR passa de 1.5). É esse relativismo — carga de agora
 medida contra a sua própria base, não contra um número universal — que
 torna o ACWR o guardrail certo pra esse projeto.
 
+### Disponibilidade da API do Gemini (503 "high demand") — 2026-10
+
+A análise semanal falhava em cerca de metade das execuções com `503
+UNAVAILABLE: This model is currently experiencing high demand`, mesmo com
+as 5 tentativas internas do SDK (`google-genai`, espera exponencial até
+60s) e as 4 tentativas do workflow (esperas de 1, 3 e 7 min). Em
+2026-10-12, as 4 falharam entre 02:03 e 02:20 UTC, sempre na geração.
+
+O que a pesquisa mostrou:
+- O 503 é falta de capacidade do modelo inteiro na Google, não cota da
+  conta: o fórum oficial do Gemini tem relatos de projetos pagos com o
+  mesmo erro, e a resposta lá é "serviço temporariamente sobrecarregado".
+  A documentação oficial só recomenda retry com espera exponencial.
+- O tier `priority` (`service_tier="priority"`, já suportado pelo SDK)
+  custa 75-100% a mais, exige conta paga Tier 2 (US$ 100+ já gastos) e,
+  quando lota, rebaixa o pedido pro tier normal -- há relato de 503
+  contínuo nele também. Descartado.
+- Horário: não há dado oficial. Dado de comunidade (outro modelo, imagem)
+  mediu menos de 5% de falha entre 2h e 7h no horário do Pacífico, contra
+  ~45% no pico. No histórico deste projeto, as execuções manuais de
+  2026-09-21 entre 10h40 e 11h49 UTC (madrugada no Pacífico) deram certo em
+  4 de 5; o cron de domingo às 23h UTC (tarde nos EUA) caía no pico, e o
+  GitHub ainda atrasava até 3 h.
+
+O que mudou:
+- **Modelos de reserva** (`MODELOS_RESERVA`, em `_gerar_json`): esgotadas
+  as tentativas do SDK, um 503/429/5xx passa pro próximo modelo
+  (`gemini-3.8-flash` → `gemini-3.7-flash` → `gemini-3.6-flash`), na
+  geração e na revisão. A sobrecarga é por modelo. Qualidade: as regras
+  de carga conferidas em Python e a revisão de coerência valem igual pra
+  qualquer modelo; o log diz qual modelo gerou.
+- **Horário:** cron no domingo às 6h BRT (9h UTC, 2h no Pacífico), com
+  reserva às 10h BRT -- se o das 6h deu certo, a reserva vê a semana já
+  escrita e sai sem fazer nada.
+- **Semana de domingo a sábado** (decisão do usuário): com o cron no
+  domingo de manhã, o plano é da semana que começa no próprio domingo, e a
+  semana anterior (base da progressão da retomada) termina no sábado, já
+  completa. `vw_resumo_semanal` passou a agrupar de domingo a sábado. A dor
+  da sessão de sábado precisa estar registrada antes das 6h de domingo pra
+  contar na progressão daquela semana.
+- Timeout por tentativa no workflow de 5 pra 15 min (uma tentativa estourou
+  os 5 min; com os modelos de reserva cada tentativa pode demorar mais).
+
+Junto com isso, dias da semana a planejar que já passaram (reexecução com
+`semana=atual`) e o dia seguinte a uma corrida real viram descanso
+obrigatório, conferido em Python -- a alternância passou a valer também na
+virada da semana.
+
+**Fontes:** [Priority inference (Gemini API)](https://ai.google.dev/gemini-api/docs/generate-content/priority-inference) · [Flex inference e comparação dos tiers](https://ai.google.dev/gemini-api/docs/generate-content/flex-inference) · [Troubleshooting (Gemini API)](https://ai.google.dev/gemini-api/docs/troubleshooting) · [503 em projeto pago (fórum)](https://discuss.ai.google.dev/t/persistent-503-unavailable-for-paid-gemini-3-7-flash-project/183055) · [503 no tier Priority (fórum)](https://discuss.ai.google.dev/t/persistent-503-on-gemini-3-7-flash-with-priority-tier-tier-2-paid-0-success-over-multiple-retries/179804) · [taxa de falha por horário (comunidade)](https://blog.laozhang.ai/en/posts/gemini-3-pro-image-api-unreliable)
+
 ### Efeito de treino (aeróbico/anaeróbico) — já vem pré-processado
 
 O `efeito_treino_aerobico`/`anaerobico` do Garmin não é dado bruto — é a

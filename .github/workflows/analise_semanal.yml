@@ -86,10 +86,12 @@ jobs:
       # do Gemini ("high demand") dura mais que os 30s que o nick-fields/retry
       # dava entre tentativas (ver docs/CASE_DO_PROJETO_1.md, 2026-09-21).
       # 4 tentativas no total; a última (espera 0) não dorme depois de falhar.
+      # Cada tentativa já passa pelos modelos de reserva (MODELOS_RESERVA),
+      # por isso 15 min por tentativa (eram 5, e uma tentativa estourou).
       - name: Gerar análise semanal
         run: |
           for espera in 60 180 420 0; do
-            if timeout 300 uv run python -m src.analyze.analisar_com_ia; then
+            if timeout 900 uv run python -m src.analyze.analisar_com_ia; then
               exit 0
             fi
             if [ "$espera" -gt 0 ]; then
