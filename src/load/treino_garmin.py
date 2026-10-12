@@ -127,7 +127,7 @@ def _treino(dia, data: date, passos: list, duracao_seg: int) -> RunningWorkout:
 
 
 def construir_treino(dia, data: date, retomada=None) -> RunningWorkout | None:
-    """`dia` é um TreinoDia e `retomada` uma Retomada (duck typing -- não
+    """`dia` é um TreinoDia e `retomada` uma SessaoRetomada (duck typing -- não
     importa analisar_com_ia pra não criar dependência circular). None se não
     for treino enviável (descanso, ou sem distância nem duração pra definir o
     passo principal)."""

@@ -273,12 +273,18 @@ semanal não é generalizável.
 Os degraus do Warden são saltos grandes por sessão (3 → 6 min de trote é
 +100%), o que conflita com o achado de Frandsen. O projeto combina os dois
 (decisão do usuário, 2026-10):
-- **Estrutura do Warden:** 3 sessões por semana, em dias alternados, todas
-  iguais: 3 blocos de 10 min de caminhada + trote.
+- **Estrutura do Warden:** sessões em dias alternados, todas iguais na
+  semana: 3 blocos de 10 min de caminhada + trote. Quantas sessões (de 1 a
+  4, o máximo que a alternância permite em 7 dias) o LLM decide pelos
+  dados -- a primeira versão fixava 3, e o usuário pediu pra não limitar.
 - **Progressão 1x por semana:** o degrau só muda de uma semana para a
   outra, nunca entre sessões da mesma semana.
-- **Teto de 10% no trote total da semana** sobre a semana anterior
-  (medido pelo Garmin, sem contar atividades classificadas como Caminhada).
+- **Dois tetos de 10% sobre a semana anterior** (trote medido pelo Garmin,
+  sem contar atividades classificadas como Caminhada): o trote de cada
+  sessão sobe no máximo 10% sobre a maior sessão da semana anterior, e o
+  trote total da semana também. Com mais sessões, cada uma pode ficar com
+  menos trote; o prompt mostra ao LLM a estrutura resultante pra cada
+  número de sessões, e o Python fixa a estrutura depois que ele escolhe.
   O primeiro degrau (1 min de trote por bloco) é o piso: começar do zero
   não tem razão a respeitar.
 - **Dor (regra do protocolo, mais rígida que o guardrail geral):**
