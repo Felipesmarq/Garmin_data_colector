@@ -239,7 +239,17 @@ SELECT
         WHEN a.efeito_treino_anaerobico >= 1.5 AND z.alta / z.total >= 0.3
             THEN CASE WHEN a.duracao_seg / 60.0 < 20 THEN 'Tiro' ELSE 'Intervalado' END
         WHEN z.alta / z.total >= 0.40 THEN 'Limiar'
-        WHEN z.alta / z.total >= 0.20 OR z.media / z.total >= 0.30 THEN 'Ritmo'
+        -- [AJUSTE-RITMO-RECOVERY 2026-10-13] experimental -- pra desfazer,
+        -- troque a linha abaixo por:
+        --   WHEN z.alta / z.total >= 0.20 OR z.media / z.total >= 0.30 THEN 'Ritmo'
+        -- Motivo: sessão de caminhada + trote de 12/10 (calor e ladeiras) teve
+        -- 30,1% na zona 3, 0% nas zonas 4-5 e rótulo RECOVERY do Garmin, e virou
+        -- "Ritmo" (planejado x realizado deu fora da margem). Só a regra da
+        -- zona 3 passa a respeitar o RECOVERY do Garmin; nenhuma sessão antiga
+        -- muda de tipo (todas as "Ritmo" tinham >= 10% nas zonas 4-5).
+        WHEN z.alta / z.total >= 0.20
+            OR (z.media / z.total >= 0.30 AND a.efeito_treino_label IS DISTINCT FROM 'RECOVERY')
+            THEN 'Ritmo'
         WHEN z.baixa / z.total >= 0.85 AND a.duracao_seg / 60.0 >= 35 THEN 'Longão'
         ELSE 'Rodagem/Recuperação'
     END AS tipo_treino,
