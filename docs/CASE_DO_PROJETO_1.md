@@ -256,7 +256,7 @@ plano tem teto de **110% da sessão mais longa (em km corridos) dos últimos
 devolvido (`_violacoes_regras`). O ACWR continua no prompt como guardrail
 secundário, já que a evidência a favor dele enfraqueceu.
 
-### Retomada pós-canelite (protocolo de Warden + progressão semanal de 10%)
+### Retomada pós-canelite (protocolo de Warden, um estágio por semana)
 
 Volta à corrida depois de lesão óssea da tíbia (canelite incluída) segue,
 na literatura clínica, uma progressão **por sessão, em minutos de trote,
@@ -271,26 +271,32 @@ recomendações são de evidência fraca (nível IV) e que a "regra dos 10%"
 semanal não é generalizável.
 
 Os degraus do Warden são saltos grandes por sessão (3 → 6 min de trote é
-+100%), o que conflita com o achado de Frandsen. O projeto combina os dois
-(decisão do usuário, 2026-10):
++100%), o que conflita com o achado de Frandsen. A primeira versão (2026-10-10)
+combinava os dois: estrutura do Warden com progressão de no máximo +10% por
+semana -- de 1 para 2 min de trote por bloco levaria 7-8 semanas. **Revisão
+de 2026-10-13 (decisão do usuário):** proteção exagerada no contexto errado.
+Frandsen et al. estudaram corredores saudáveis em treino regular; a
+retomada é readaptação do corpo à corrida, guiada por protocolo clínico.
+Então, durante a retomada vale o Warden puro, e a regra dos 10% fica para
+depois dela:
 - **Estrutura do Warden:** sessões em dias alternados, todas iguais na
   semana: 3 blocos de 10 min de caminhada + trote. Quantas sessões (de 1 a
   4, o máximo que a alternância permite em 7 dias) o LLM decide pelos
   dados -- a primeira versão fixava 3, e o usuário pediu pra não limitar.
-- **Progressão 1x por semana:** o degrau só muda de uma semana para a
-  outra, nunca entre sessões da mesma semana.
-- **Dois tetos de 10% sobre a semana anterior** (trote medido pelo Garmin,
-  sem contar atividades classificadas como Caminhada): o trote de cada
-  sessão sobe no máximo 10% sobre a maior sessão da semana anterior, e o
-  trote total da semana também. Com mais sessões, cada uma pode ficar com
-  menos trote; o prompt mostra ao LLM a estrutura resultante pra cada
-  número de sessões, e o Python fixa a estrutura depois que ele escolhe.
-  O primeiro degrau (1 min de trote por bloco) é o piso: começar do zero
-  não tem razão a respeitar.
+- **Um estágio por semana:** 1, 2, 3, 4, 6 e 8 min de trote por bloco e,
+  por fim, 30 min contínuos (`RETOMADA_ESTAGIOS_SEG`). O estágio só muda de
+  uma semana para a outra, nunca entre sessões da mesma semana.
+- **A base é o estágio prescrito, não o trote detectado**
+  (`_trote_prescrito`, lido do motivo gravado na aba "Plano da Semana"): o
+  trote detectado pelo Garmin só confirma que o estágio foi cumprido (90%
+  do prescrito, folga pro erro de detecção). Trotar além do prescrito não
+  pula estágio -- na semana de 11/10, o corredor trotou 1:53 por bloco num
+  estágio de 1:00, e a semana seguinte vai pra 2:00, não 3:00.
 - **Dor (regra do protocolo, mais rígida que o guardrail geral):**
-  qualquer dor registrada (>= 1) na semana volta um degrau; só sobe com dor
-  0 registrada em todas as sessões com trote; sessão sem dor registrada
-  repete o degrau.
+  qualquer dor registrada (>= 1) na semana volta um estágio (do 1º, volta
+  pra só caminhada); só sobe com dor 0 registrada em todas as sessões com
+  trote; sessão sem dor registrada, ou trote abaixo do prescrito, repete o
+  estágio. Semana sem nenhuma sessão com trote também repete.
 - **Fim da retomada:** quando houve sessão com ~30 min de trote (95%) nos
   últimos 30 dias. Daí em diante vale o regime normal (teto por sessão +
   ACWR). A etapa 2 do Warden (30 min contínuos com ritmo subindo de 50% a
@@ -721,8 +727,7 @@ script, mesma janela de 4 semanas dos outros dados.
 
 Guardrails determinísticos em Python, não uma aposta em o modelo
 perceber sozinho, em dois regimes de carga: em retomada,
-`_instrucao_retomada` (protocolo de Warden com progressão semanal de no
-máximo 10%, ver "Retomada pós-canelite" na seção 6.1); fora dela,
+`_instrucao_retomada` (protocolo de Warden, um estágio por semana, ver "Retomada pós-canelite" na seção 6.1); fora dela,
 `_instrucao_teto_sessao` (sessão até 110% da mais longa dos últimos 30
 dias, Frandsen et al. 2025) e `_instrucao_guardrail_acwr` (ACWR em km
 corridos, só dispara acima de 1.3, nunca pra ACWR baixo). Em ambos,

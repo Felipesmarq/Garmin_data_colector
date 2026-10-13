@@ -8,8 +8,8 @@ Guardrails (seção 6.1) não dependem do modelo "perceber" risco sozinho --
 calculados em Python e injetados como instrução obrigatória no prompt, não
 uma aposta em o LLM notar um número no meio da tabela. Dois regimes de
 carga: em retomada (`_estado_retomada` -- ainda sem sessão de ~30 min de
-trote nos últimos 30 dias) a semana segue o protocolo de Warden com
-progressão semanal de no máximo 10% (`_instrucao_retomada`); fora dela,
+trote nos últimos 30 dias) a semana segue o protocolo de Warden, um
+estágio por semana (`_instrucao_retomada`); fora dela,
 ACWR em km corridos (`_instrucao_guardrail_acwr`) + teto por sessão de
 Frandsen et al. 2025 (`_instrucao_teto_sessao`). Por cima dos dois,
 `_instrucao_guardrail_dor` (trava intensidade se a dor mais recente
@@ -28,6 +28,7 @@ fácil de ajustar/testar, não uma verdade definitiva.
 """
 
 import os
+import re
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -88,18 +89,21 @@ ZONA_SEGURA_MIN = 0.8
 ZONA_SEGURA_MAX = 1.3
 ZONA_ALERTA_REFORCADO = 1.5
 
-# Retomada pós-canelite -- estrutura do protocolo de Warden et al. (3 blocos
-# de 10 min de caminhada + trote, em dias alternados) com progressão 1x por
-# semana: as sessões da semana repetem o mesmo degrau, o trote de cada
-# sessão sobe no máximo 10% sobre a maior sessão da semana anterior, e o
-# trote total da semana também (ver CASE_DO_PROJETO_1.md seção 6.1,
-# "Retomada"). O número de sessões é decisão do LLM, até o que a regra de
-# alternância permite.
+# Retomada pós-canelite -- protocolo de Warden et al. puro: 3 blocos de 10
+# min de caminhada + trote, em dias alternados, subindo um estágio por
+# semana (todas as sessões da semana no mesmo estágio). A regra dos 10%
+# (Frandsen) só vale depois da retomada: é estudo de corredor saudável em
+# treino regular, não de readaptação (decisão do usuário, 2026-10-13 -- ver
+# CASE_DO_PROJETO_1.md seção 6.1, "Retomada"). O número de sessões é
+# decisão do LLM, até o que a regra de alternância permite.
 RETOMADA_BLOCOS = 3
 RETOMADA_BLOCO_SEG = 10 * 60
-RETOMADA_TROTE_INICIAL_SEG = 60  # 1º degrau do Warden: caminha 9 min / trota 1 min
-RETOMADA_AUMENTO_SEMANAL = 0.10
-RETOMADA_PASSO_SEG = 5  # trote por bloco arredondado pra baixo em múltiplos de 5s
+# Trote por bloco em cada estágio: 9/1, 8/2, 7/3, 6/4, 4/6, 2/8 min e, por
+# fim, 30 min contínuos (600 = bloco inteiro de trote).
+RETOMADA_ESTAGIOS_SEG = (60, 120, 180, 240, 360, 480, 600)
+# Estágio cumprido = a maior sessão da semana teve pelo menos 90% do trote
+# prescrito (folga pro erro de detecção corrida/caminhada do Garmin).
+RETOMADA_CUMPRIDO_FRACAO = 0.9
 # Referências do trote na retomada, do próprio corredor (não tabela genérica):
 # pace = mediana do pace dos trechos de corrida (RWD_RUN) das sessões de
 # Rodagem/Recuperação recentes, arredondada pra baixo em 15s, com 30s de
@@ -342,10 +346,6 @@ class SessaoRetomada(BaseModel):
         return f"{self.blocos}x (caminhe {_mmss(self.caminhada_seg)} + trote {_mmss(self.trote_seg)})"
 
 
-def _arredondar_trote(seg: float) -> int:
-    return int(seg // RETOMADA_PASSO_SEG * RETOMADA_PASSO_SEG)
-
-
 def _montar_sessao(trote_por_bloco: int) -> SessaoRetomada:
     total = RETOMADA_BLOCOS * RETOMADA_BLOCO_SEG
     if trote_por_bloco <= 0:
@@ -360,21 +360,15 @@ def _montar_sessao(trote_por_bloco: int) -> SessaoRetomada:
 
 
 class Retomada(BaseModel):
-    """Limites da semana em retomada. A estrutura da sessão depende de
-    quantas sessões o LLM escolher (`sessao(n)`): o trote por sessão tem
-    teto próprio, e o trote total da semana também -- com mais sessões,
-    cada uma pode ter menos trote."""
-    trote_max_bloco: int  # teto de trote por bloco (sessão)
-    trote_max_semana_seg: float | None  # teto do trote total da semana; None = sem teto (1º degrau)
-    decisao: str  # por que o degrau subiu, repetiu ou voltou
+    """Estágio da semana em retomada -- igual pra todas as sessões, seja
+    quantas forem."""
+    trote_bloco: int  # trote por bloco do estágio; 0 = só caminhada (voltou do 1º estágio)
+    decisao: str  # por que o estágio subiu, repetiu ou voltou
     pace_trote: tuple[float, float] | None = None  # ver _referencias_trote
     fc_teto: int | None = None
 
-    def sessao(self, n: int) -> SessaoRetomada:
-        trote = self.trote_max_bloco
-        if self.trote_max_semana_seg is not None and n > 0:
-            trote = min(trote, _arredondar_trote(self.trote_max_semana_seg / (n * RETOMADA_BLOCOS)))
-        return _montar_sessao(trote).model_copy(update={"pace_trote": self.pace_trote, "fc_teto": self.fc_teto})
+    def sessao(self) -> SessaoRetomada:
+        return _montar_sessao(self.trote_bloco).model_copy(update={"pace_trote": self.pace_trote, "fc_teto": self.fc_teto})
 
 
 def _referencias_trote(con: psycopg.Connection, hoje: date) -> tuple[tuple[float, float] | None, int | None]:
@@ -412,57 +406,76 @@ def _sessoes_antes_de(con: psycopg.Connection, inicio_semana: date) -> list[tupl
     return linhas
 
 
-def _estado_retomada(sessoes: list[tuple], inicio_semana: date) -> Retomada | None:
+def _indice_estagio(trote_bloco: float) -> int:
+    """Índice do maior estágio com trote <= trote_bloco (-1 se abaixo do 1º)."""
+    return max((i for i, e in enumerate(RETOMADA_ESTAGIOS_SEG) if e <= trote_bloco), default=-1)
+
+
+def _trote_prescrito(spreadsheet: gspread.Spreadsheet, inicio_semana: date) -> int | None:
+    """Trote por bloco prescrito na semana anterior, lido do motivo gravado
+    na aba "Plano da Semana" ("3x (caminhe 9:00 + trote 1:00) ..." ou "30
+    min de trote contínuo"). None se a semana anterior não teve sessão de
+    retomada no plano."""
+    datas = {str(inicio_semana - timedelta(days=i)) for i in range(1, 8)}
+    aba = obter_aba(spreadsheet, ABA_PLANO, CABECALHO_PLANO, cor=COR_PLANO)
+    idx_data, idx_motivo = CABECALHO_PLANO.index("data"), CABECALHO_PLANO.index("motivo")
+    prescritos = []
+    for linha in aba.get_all_values()[1:]:
+        if len(linha) <= idx_motivo or linha[idx_data] not in datas:
+            continue
+        motivo = linha[idx_motivo]
+        if casou := re.match(r"\d+x \(caminhe \d+:\d{2} \+ trote (\d+):(\d{2})\)", motivo):
+            prescritos.append(int(casou.group(1)) * 60 + int(casou.group(2)))
+        elif re.match(r"\d+ min de trote contínuo", motivo):
+            prescritos.append(RETOMADA_BLOCO_SEG)
+    return max(prescritos) if prescritos else None
+
+
+def _estado_retomada(sessoes: list[tuple], inicio_semana: date, prescrito: int | None) -> Retomada | None:
     """None se o corredor já não está em retomada (fez sessão de ~30 min de
-    trote nos últimos 30 dias). Senão, os limites da semana a planejar, a
-    partir da semana anterior:
-      - qualquer dor registrada (>= 1) -> volta um degrau (regra do protocolo);
-      - nenhuma sessão com trote -> primeiro degrau (começa ou recomeça);
-      - todas as sessões com trote com dor 0 registrada -> sobe: trote por
-        sessão e trote total da semana +10% no máximo;
-      - alguma sessão com trote sem dor registrada -> repete o degrau.
-    Caminhada (tipo_treino) fica fora da conta de trote: o pouco de "trote"
-    que o Garmin detecta nela inflaria a base da progressão."""
+    trote nos últimos 30 dias). Senão, o estágio da semana a planejar, a
+    partir do estágio prescrito na semana anterior (`prescrito`, ver
+    _trote_prescrito) -- não do trote detectado, que só confirma se ele foi
+    cumprido (trotar além do prescrito não pula estágio):
+      - qualquer dor registrada (>= 1) -> volta um estágio (regra do protocolo);
+      - nenhuma sessão com trote -> repete o estágio (1º, se não havia);
+      - estágio cumprido e todas as sessões com trote com dor 0 registrada -> sobe um;
+      - senão (sessão sem dor registrada, ou trote abaixo do prescrito) -> repete.
+    Sem plano anterior lido (`prescrito` None), usa o maior estágio que o
+    trote detectado cumpre. Caminhada (tipo_treino) fica fora da conta de
+    trote: o pouco de "trote" que o Garmin detecta nela não é sessão."""
     if any(float(s[2] or 0) >= RETOMADA_FIM_TROTE_SEG for s in sessoes):
         return None
 
     semana = [s for s in sessoes if s[0] >= inicio_semana - timedelta(days=7)]
     com_trote = [s for s in semana if s[1] != "Caminhada"]
-    trote_semana = sum(float(s[2] or 0) for s in com_trote)
     maior_bloco = max((float(s[2] or 0) for s in com_trote), default=0.0) / RETOMADA_BLOCOS
     dores = [int(s[4]) for s in semana if s[4] is not None]
-    aumento = 1 + RETOMADA_AUMENTO_SEMANAL
+
+    if prescrito is not None:
+        atual = _indice_estagio(prescrito)
+        cumprido = maior_bloco >= RETOMADA_CUMPRIDO_FRACAO * prescrito
+    else:
+        atual = _indice_estagio(maior_bloco / RETOMADA_CUMPRIDO_FRACAO)
+        cumprido = atual >= 0
+    estagio = lambda i: RETOMADA_ESTAGIOS_SEG[min(max(i, 0), len(RETOMADA_ESTAGIOS_SEG) - 1)]
+    txt = lambda seg: "30 min contínuos" if seg >= RETOMADA_BLOCO_SEG else f"trote {_mmss(seg)} por bloco"
 
     if dores and max(dores) >= LIMIAR_DOR_RETOMADA:
-        bloco = _arredondar_trote(maior_bloco / aumento)
-        return Retomada(
-            trote_max_bloco=bloco if bloco >= RETOMADA_TROTE_INICIAL_SEG else 0,
-            trote_max_semana_seg=trote_semana / aumento,
-            decisao=f"dor {max(dores)} registrada na semana anterior: o protocolo volta um degrau",
-        )
+        trote = estagio(atual - 1) if atual >= 1 else 0
+        return Retomada(trote_bloco=trote, decisao=f"dor {max(dores)} registrada na semana anterior: o protocolo volta um estágio")
     if not com_trote:
         return Retomada(
-            trote_max_bloco=RETOMADA_TROTE_INICIAL_SEG,
-            trote_max_semana_seg=None,
-            decisao="nenhuma sessão com trote na semana anterior: começa (ou recomeça) no primeiro degrau do protocolo",
+            trote_bloco=estagio(atual),
+            decisao="nenhuma sessão com trote na semana anterior: repete o estágio (o 1º, se ainda não havia)",
         )
-    if all(s[4] is not None for s in com_trote):
+    if cumprido and all(s[4] is not None for s in com_trote) and atual + 1 < len(RETOMADA_ESTAGIOS_SEG):
         return Retomada(
-            trote_max_bloco=max(RETOMADA_TROTE_INICIAL_SEG, _arredondar_trote(maior_bloco * aumento)),
-            trote_max_semana_seg=trote_semana * aumento,
-            decisao=(
-                f"todas as sessões com trote da semana anterior sem dor: sobe um degrau "
-                f"(trote total da semana anterior {trote_semana / 60:.1f} min, +10% no máximo)"
-            ),
+            trote_bloco=estagio(atual + 1),
+            decisao=f"estágio anterior ({txt(estagio(atual))}) cumprido sem dor: sobe um estágio",
         )
-    return Retomada(
-        trote_max_bloco=max(RETOMADA_TROTE_INICIAL_SEG, _arredondar_trote(maior_bloco)),
-        trote_max_semana_seg=trote_semana,
-        decisao=(
-            "alguma sessão com trote da semana anterior está sem dor registrada: repete o "
-            "degrau (só sobe com dor 0 registrada em todas)"
-        ),
-    )
+    motivo = "trote abaixo do prescrito" if not cumprido else "alguma sessão com trote sem dor registrada (só sobe com dor 0 registrada em todas)"
+    return Retomada(trote_bloco=estagio(atual), decisao=f"{motivo}: repete o estágio")
 
 
 def _max_sessoes(dias_livres: int) -> int:
@@ -472,22 +485,17 @@ def _max_sessoes(dias_livres: int) -> int:
 
 
 def _instrucao_retomada(r: Retomada, max_sessoes: int) -> str:
-    s = r.sessao(1)
+    s = r.sessao()
     referencias = ", ".join(
         t for t in (s.texto_pace() and f"pace {s.texto_pace()}", s.texto_fc() and f"FC {s.texto_fc()}") if t
     ) or "sem histórico de trote suficiente"
-    opcoes = "; ".join(
-        f"{n} sessão(ões): {r.sessao(n).descricao()} ({r.sessao(n).duracao_min:.0f} min)"
-        for n in range(1, max_sessoes + 1)
-    )
     return (
-        f"INSTRUÇÃO OBRIGATÓRIA (retomada pós-canelite -- protocolo de Warden et al., com "
-        f"progressão de no máximo 10% por semana): o corredor ainda não sustenta 30 min de "
-        f"trote. Quantas sessões fazer nesta semana é decisão sua, com base nos dados (de 1 a "
-        f"{max_sessoes}, em dias alternados, nunca seguidos). Todas as sessões da semana são "
-        f"iguais, e a estrutura de cada uma depende só do número de sessões, porque o trote "
-        f"total da semana tem teto: {opcoes}. Degrau desta semana: {r.decisao}. Cada sessão é "
-        f"Rodagem/Recuperação com a duracao_min da opção escolhida e distancia_km nulo; "
+        f"INSTRUÇÃO OBRIGATÓRIA (retomada pós-canelite -- protocolo de Warden et al., um "
+        f"estágio por semana): o corredor ainda não sustenta 30 min de trote. Quantas sessões "
+        f"fazer nesta semana é decisão sua, com base nos dados (de 1 a {max_sessoes}, em dias "
+        f"alternados, nunca seguidos). Todas as sessões da semana são iguais: {s.descricao()} "
+        f"({s.duracao_min:.0f} min). Estágio desta semana: {r.decisao}. Cada sessão é "
+        f"Rodagem/Recuperação com duracao_min {s.duracao_min:.0f} e distancia_km nulo; "
         f"pace_alvo e fc_alvo são preenchidos depois, a partir do histórico dele ({referencias}). "
         f"O trote é bem leve, conversável. Nenhum outro tipo de treino (nem "
         f"Longão, nem intensidade). Explique no motivo que, se doer durante, depois ou no dia "
@@ -550,10 +558,10 @@ def _violacoes_regras(
 
 
 def _aplicar_retomada(plano: "PlanoSemanal", r: Retomada) -> SessaoRetomada:
-    """Fixa em Python a estrutura de cada sessão, conforme quantas o LLM
-    escolheu (ele escolhe os dias e escreve o motivo, não os números) -- vai
-    igual pra planilha, e-mail e relógio."""
-    sessao = r.sessao(sum(1 for d in plano.dias if not d.descanso))
+    """Fixa em Python a estrutura de cada sessão (o LLM escolhe quantas e
+    em que dias, e escreve o motivo, não os números) -- vai igual pra
+    planilha, e-mail e relógio."""
+    sessao = r.sessao()
     for dia in plano.dias:
         if dia.descanso:
             continue
@@ -1086,7 +1094,7 @@ if __name__ == "__main__":
     linhas_resumo = list(reversed(linhas_resumo_desc))  # ordem cronológica pro prompt
 
     sessoes = _sessoes_antes_de(con, dias[0])
-    retomada = _estado_retomada(sessoes, dias[0])
+    retomada = _estado_retomada(sessoes, dias[0], _trote_prescrito(spreadsheet, dias[0]))
     if retomada:
         pace_trote, fc_teto = _referencias_trote(con, hoje_brt())
         retomada = retomada.model_copy(update={"pace_trote": pace_trote, "fc_teto": fc_teto})
