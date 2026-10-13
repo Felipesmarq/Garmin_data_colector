@@ -50,6 +50,7 @@ from src.load.planilha_desempenho import (
     COLUNAS_REAIS,
     COR_ATIVIDADES,
     STATUS_PLANEJADO,
+    ordenar_atividades,
 )
 from src.planilha import conectar as conectar_planilha, inserir_linhas, inserir_linhas_no_topo, obter_aba
 
@@ -1182,6 +1183,7 @@ if __name__ == "__main__":
         print(f"[{n_plan} dia(s) planejado(s) escrito(s) na aba '{ABA_ATIVIDADES}', status {STATUS_PLANEJADO}]")
     else:
         print(f"[dias planejados da semana de {dias[0]} já estavam na aba '{ABA_ATIVIDADES}', não duplicados]")
+    ordenar_atividades(spreadsheet)
 
     enviar_email_resumo(plano, dias)
     print("[e-mail com o plano da semana enviado]")

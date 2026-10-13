@@ -11,7 +11,7 @@ from pathlib import Path
 import gspread
 from dotenv import load_dotenv
 from google.oauth2.service_account import Credentials
-from gspread.utils import ValidationConditionType
+from gspread.utils import ValidationConditionType, rowcol_to_a1
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -125,6 +125,17 @@ def sobrescrever(aba: gspread.Worksheet, cabecalho: list[str], linhas: list[tupl
         aba.add_cols(len(cabecalho) - aba.col_count)
     aba.append_row(cabecalho)
     inserir_linhas(aba, [[_texto(v) for v in linha] for linha in linhas])
+
+
+def ordenar_decrescente(aba: gspread.Worksheet, coluna: int) -> None:
+    """Ordena as linhas abaixo do cabeçalho pela coluna (1-based), maior
+    primeiro -- a mesma ordenação do menu Dados do Sheets: reordena as
+    linhas inteiras, sem reescrever conteúdo. Faixa explícita (não "aba
+    inteira menos linhas congeladas"): não depende de o cabeçalho estar
+    congelado."""
+    n_linhas = len(aba.col_values(coluna))
+    if n_linhas > 2:
+        aba.sort((coluna, "des"), range=f"A2:{rowcol_to_a1(n_linhas, aba.col_count)}")
 
 
 def _texto(v) -> str:

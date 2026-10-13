@@ -27,7 +27,7 @@ import psycopg
 
 from src.db import conectar
 from src.email_util import enviar_email
-from src.planilha import conectar as conectar_planilha, inserir_linhas_no_topo, obter_aba, sobrescrever
+from src.planilha import conectar as conectar_planilha, inserir_linhas_no_topo, obter_aba, ordenar_decrescente, sobrescrever
 from src.tempo import hoje_brt
 
 ABA_ATIVIDADES = "Atividades"
@@ -202,6 +202,16 @@ def escrever_atividades(con: psycopg.Connection, spreadsheet) -> int:
     ]
     inserir_linhas_no_topo(aba, linhas_formatadas)
     return len(linhas)
+
+
+def ordenar_atividades(spreadsheet) -> None:
+    """Aba "Atividades" por data, mais recente primeiro. As escritas inserem
+    no topo (atividade nova no sync diário, dias planejados no domingo), o
+    que deixava a aba em ordem de inserção: planejado futuro acima de
+    atividade já feita. Roda depois de cada escrita. `data` é texto ISO
+    (2026-10-12), então a ordem de texto é a ordem de data."""
+    aba = obter_aba(spreadsheet, ABA_ATIVIDADES, CABECALHO_ATIVIDADES, cor=COR_ATIVIDADES)
+    ordenar_decrescente(aba, CABECALHO_ATIVIDADES.index("data") + 1)
 
 
 # Margens de tolerância pra considerar um dia "dentro do planejado" (Fase 9)
@@ -427,6 +437,8 @@ if __name__ == "__main__":
     if resolvidos:
         detalhe = ", ".join(f"{d.strftime('%d/%m')}={s}" for d, s in resolvidos)
         print(f"{len(resolvidos)} dia(s) planejado(s) resolvido(s): {detalhe}")
+
+    ordenar_atividades(spreadsheet)
 
     ontem = hoje_brt() - timedelta(days=1)
     pendencias_ontem = [
