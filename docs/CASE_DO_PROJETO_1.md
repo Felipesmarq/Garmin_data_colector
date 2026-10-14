@@ -62,13 +62,13 @@ Relógio Garmin ──sync──▶ Garmin Connect
                      [ Transformação ] ── SQL: staging → vw_sessoes (por atividade) → vw_resumo_semanal
                               │
                               ▼
-                       [ Análise (IA) ] ── Gemini API (free tier), a partir de vw_sessoes_ia (curada)
+                       [ Análise (IA) ] ── Gemini API, a partir de vw_sessoes_ia (curada) + regras de carga em Python
                               │
                               ▼
-                       Relatório semanal (treino sugerido + alerta de sobrecarga se aplicável)
+                       Plano da semana ── planilha (Google Sheets) + e-mail + treino estruturado no relógio
                               │
                               ▼
-                    Você ajusta o treino ──┐
+                    Você treina e registra a dor ──┐
                               ▲             │
                               └─────────────┘ (vira dado da semana seguinte)
 ```
@@ -77,15 +77,15 @@ Relógio Garmin ──sync──▶ Garmin Connect
 
 | Camada | Tecnologia | Por quê |
 |---|---|---|
-| Linguagem | Python 3.11+ | Ecossistema maduro pras duas pontas (dados + API de IA) |
+| Linguagem | Python 3.12+ (gerenciado com `uv`) | Ecossistema maduro pras duas pontas (dados + API de IA) |
 | Extração | `garminconnect` (PyPI) | Melhor opção existente pronta — sem alternativa madura melhor no momento |
 | Armazenamento | **Postgres gerenciado (Neon)** | Free sem cartão, scale-to-zero (custo zero ocioso), SQL completo, elimina dado sensível versionado no git. Substitui o DuckDB commitado. |
 | Transformação | SQL (views no Postgres) | Staging → view por atividade → view agregada semanal — sem tabela materializada nem script de ETL extra |
 | Registro de dor | **Google Sheets (`gspread`)** | Acessível do celular, sem passo manual de commit — resolve o mesmo problema que tornou o Excel local inviável (ver seção 11), com autenticação via service account em vez de OAuth de usuário. |
-| Análise | **Gemini API (Google AI Studio)** | Free tier: 1.500 req/dia, sem cartão, contexto de até 1M tokens. Substitui Anthropic (custo zero era requisito). Chamada isolada atrás de uma função única para permitir trocar de provedor sem reescrever o resto — free tiers de LLM mudam com frequência. |
+| Análise | **Gemini API (Google AI Studio)** | Free tier sem cartão, contexto de até 1M tokens (os limites do free tier mudam com frequência). Substitui Anthropic (custo zero era requisito). Chamada isolada atrás de uma função única para permitir trocar de provedor sem reescrever o resto — free tiers de LLM mudam com frequência. |
 | Orquestração | GitHub Actions (2 workflows agendados) | Grátis, cron nativo, já versiona o código, Secrets pra credenciais. Único ambiente de produção — Docker fica só como conveniência de dev local, não faz parte da arquitetura de produção. |
 | Dev local | Docker / docker-compose (opcional) | Só para rodar/testar mais rápido na máquina local, sem instalar Python direto. Não é usado em produção. |
-| Versionamento | Git/GitHub (repositório **privado**) | Nenhum dado de saúde é commitado a partir desta revisão — nem `.duckdb`, nem export nenhum. |
+| Versionamento | Git/GitHub (repositório **público** desde 2026-10) | Nenhum dado de saúde é commitado — nem `.duckdb`, nem export nenhum. Com o repositório público, os logs do GitHub Actions também são públicos: no Actions o código não imprime plano, dor nem justificativa da revisão (`EM_CI`, `src/config.py`). |
 
 **Removido nesta revisão:** Excel/`openpyxl` (input manual de dor) — inviável
 de manter sincronizado sem passo manual; confirmado fora de escopo (ver seção
@@ -95,21 +95,29 @@ trocado por Postgres externo.
 ## 5. Engenharia do projeto — estrutura de pastas
 
 ```
-garmin-ia-pipeline/
+Garmin_data_colector/
 ├── .github/workflows/
-│   ├── sync_atividades.yml     # roda em schedule (ex. a cada 2-3h): extrai atividades + recuperação novas
-│   └── analise_semanal.yml     # roda todo domingo: gera a análise da semana
+│   ├── sync_atividades.yml     # diário, 21h BRT: atividades + recuperação + dor + dashboard
+│   └── analise_semanal.yml     # domingo, 6h BRT (reserva às 10h): resync + plano da semana
 ├── src/
-│   ├── db.py                   # conexão + helpers do Postgres (psycopg)
-│   ├── planilha.py              # conexão Google Sheets + abas/linhas (mecânica genérica, sem regra de negócio)
-│   ├── extract/garmin.py       # puxa atividades + sono/FC de repouso
+│   ├── config.py               # raiz do projeto, leitura do .env, flag EM_CI
+│   ├── db.py                   # conexão Postgres + aplica schema.sql + consultar/sql_upsert
+│   ├── planilha.py             # conexão Google Sheets + abas/linhas (mecânica genérica, sem regra de negócio)
+│   ├── formato.py              # pace, números com vírgula, leitura de faixas de pace/FC
+│   ├── email_util.py           # envio de e-mail via Gmail SMTP
+│   ├── tempo.py                # "hoje" no horário de Brasília
+│   ├── extract/garmin.py       # puxa atividades (+ splits run/walk) e recuperação diária
 │   ├── load/
-│   │   ├── schema.sql          # DDL Postgres: stg_atividades, stg_recuperacao_diaria, stg_dor
-│   │   ├── views.sql           # vw_sessoes, vw_sessoes_ia, vw_resumo_semanal
+│   │   ├── schema.sql          # DDL + views: stg_* -> vw_sessoes -> vw_sessoes_ia -> vw_resumo_semanal
 │   │   ├── load_atividades.py / load_recuperacao.py  # upsert incremental (ON CONFLICT)
 │   │   ├── load_dor.py         # Fase 6 -- aba "Dor": exporta pendentes + importa preenchidas
-│   │   └── planilha_desempenho.py  # Fase 6 -- abas "Atividades"/"Resumo Semanal", somente-leitura
-│   └── analyze/analisar_com_ia.py
+│   │   ├── planilha_desempenho.py  # abas "Atividades" (upsert + aderência, Fase 9) e "Resumo Semanal"
+│   │   └── treino_garmin.py    # Fase 12 -- plano da semana como treino estruturado no relógio
+│   └── analyze/                # Fase 7 -- plano semanal (ponto de entrada: analisar_com_ia.py)
+│       ├── contexto.py · semana.py      # dados da semana a planejar
+│       ├── retomada.py · guardrails.py  # regras de carga e dor em Python
+│       ├── prompt.py · gemini.py        # texto do prompt e chamadas ao Gemini
+│       └── modelos.py · entrega.py      # formatos de dados; planilha, texto e e-mail do plano
 ├── explore/                    # scripts de investigação (não fazem parte do pipeline final)
 ├── pyproject.toml · uv.lock · .env.example · .gitignore · README.md
 ```
@@ -123,6 +131,10 @@ Neon, fora do repositório.
 - `stg_atividades` — 1 linha por atividade (PK `activity_id`), todos os
   campos do Garmin (distância, pace, FC, cadência, zonas de FC, contato com
   solo, oscilação vertical, elevação, efeito de treino, etc.)
+- `stg_atividade_splits` — trechos de cada atividade (PK `activity_id` +
+  `split_index`), com o tipo do trecho (`RWD_RUN`/`RWD_WALK` no run-walk),
+  duração e distância. Base de `km_corridos` e do tempo de trote da
+  retomada.
 - `stg_recuperacao_diaria` — 1 linha por dia (PK `data`): sono, FC de
   repouso, body battery, estresse, passos.
 - `stg_dor` — 1 linha por **atividade** anotada (PK `activity_id`, não
@@ -143,7 +155,9 @@ Inclui `classificacao_atividade`, derivada de `efeito_treino_label`
 que esse é o único critério confiável disponível. Inclui também
 `tipo_treino`, classificação mais específica (Rodagem/Longão/Ritmo/
 Limiar/Intervalado/Tiro/Caminhada) pelo sistema de Jack Daniels, derivada
-de % de tempo por zona de FC + efeito anaeróbico — ver seção 6.1.
+de % de tempo por zona de FC + efeito anaeróbico — ver seção 6.1. E
+`km_corridos`: a distância ponderada pela fração do tempo correndo
+(`RWD_RUN`), a carga usada no ACWR e no teto por sessão.
 
 **`vw_sessoes_ia` (view curada) — só os campos com sinal para geração de
 treino + guardrail de sobrecarga:**
@@ -161,10 +175,12 @@ conforme aumenta contexto irrelevante no prompt — não é sobre limite de
 token (o Gemini tem 1M de contexto, sobra), é sobre qualidade do raciocínio
 piorar com ruído mesmo havendo espaço de sobra.
 
-**`vw_resumo_semanal` (view, como já era) — agregação por semana (domingo a sábado desde 2026-10; antes, semana ISO):**
-km total, tempo total, nº de atividades, **carga aguda (últimos 7 dias) e
-carga crônica (média móvel dos últimos 28 dias)** para cálculo do ACWR (ver
-seção 6.1), tendência de sono/FC repouso/body battery.
+**`vw_resumo_semanal` (view) — agregação por semana de domingo a sábado
+(a mesma semana do plano; até 2026-10 era a semana ISO):** km total, km
+corridos, tempo total, nº de atividades, **carga aguda (km corridos da
+semana) e carga crônica (média das últimas 4 semanas de calendário,
+semanas sem atividade contando 0)** para o ACWR (ver seção 6.1), tendência
+de sono/FC repouso.
 
 ## 6.1 Fundamentação: o que os dados do Garmin significam pra análise de performance
 
@@ -208,11 +224,11 @@ pra caber no ritmo do projeto.
 últimas 4 semanas de carga aguda (também janela móvel diária).
 
 **O que `vw_resumo_semanal` calcula (granularidade semanal, não diária):**
-- **Carga aguda** = km total da semana corrente (coluna `km_total`; domingo a
-  sábado desde 2026-10, e km corridos, ver revisão abaixo).
-- **Carga crônica** = média do km total das últimas 4 semanas — a
+- **Carga aguda** = km corridos da semana corrente (coluna `km_corridos`;
+  semana de domingo a sábado desde 2026-10 -- ver revisão abaixo).
+- **Carga crônica** = média dos km corridos das últimas 4 semanas — a
   semana corrente + as 3 anteriores:
-  `AVG(km_total) OVER (ORDER BY semana_inicio ROWS BETWEEN 3 PRECEDING AND CURRENT ROW)`.
+  `AVG(km_corridos) OVER (ORDER BY semana_inicio ROWS BETWEEN 3 PRECEDING AND CURRENT ROW)`.
 - **ACWR** = carga aguda / carga crônica.
 
 **Revisão de 2026-10 (carga em km corridos):** a "carga" de cima passou a
@@ -226,6 +242,35 @@ classificada como `Caminhada` em `vw_sessoes.tipo_treino` (no dado real,
 caminhadas ficaram entre 0,4% e 4,9%, treinos run-walk entre 10% e 70%).
 Semanas sem atividade agora entram com 0 (antes a janela de 4 linhas
 pulava as semanas paradas).
+
+**Por que semanal e não diário:** o relatório roda 1x por semana (domingo).
+Uma janela diária de 7/28 dias exigiria uma "espinha" de todos os dias do
+calendário (inclusive dias sem corrida, contando como zero) só pra
+alimentar um número que só é lido semanalmente — complexidade sem
+benefício prático nesse caso de uso. A aproximação semanal (4 semanas de
+calendário em vez de 28 dias corridos) entrega essencialmente o mesmo sinal com uma
+query bem mais simples, e casa com o fato de o relatório em si só existir
+1x por semana.
+
+**Por que isso importa mais que uma regra de % fixa:** a variação %
+simples (semana atual vs. anterior) trata todo mundo igual — 10% de
+aumento é "o limite" tanto pra quem treina há anos quanto pra quem está
+voltando de lesão do zero. O ACWR é relativo à sua própria base recente:
+compara o que você fez essa semana com a média do que você vem
+sustentando nas últimas 4 semanas. Isso captura dois cenários que uma
+regra fixa erra: (1) alguém com base crônica alta e estável pode absorver
+um aumento maior que 10% com segurança — o denominador (carga crônica) já
+é alto, então o mesmo aumento absoluto gera um ACWR menor; (2) alguém com
+base baixa (poucas semanas de retomada) que dá um salto de volume, mesmo
+que o salto pareça pequeno em termos absolutos, gera um ACWR alto porque o
+denominador é pequeno — é exatamente o padrão que precede reincidência de
+lesão, segundo a pesquisa de Gabbett (2-4x mais chance de lesão na semana
+seguinte quando ACWR passa de 1.5). É esse relativismo — carga de agora
+medida contra a sua própria base, não contra um número universal — que
+fez do ACWR o guardrail principal do projeto. Desde 2026-10 ele é
+secundário: Frandsen et al. (2025, seção abaixo) não acharam relação entre
+ACWR e lesão, e o controle de carga passou a ser o teto por sessão e, na
+retomada, o protocolo de Warden.
 
 ### Carga por sessão, não por semana (Frandsen et al., 2025)
 
@@ -283,6 +328,9 @@ depois dela:
   semana: 3 blocos de 10 min de caminhada + trote. Quantas sessões (de 1 a
   4, o máximo que a alternância permite em 7 dias) o LLM decide pelos
   dados -- a primeira versão fixava 3, e o usuário pediu pra não limitar.
+  **Decidido em 2026-10-14, a implementar** (sugestões #1/#2 do documento
+  do treinador): 3 sessões de evolução fixas por semana, e a IA pode
+  acrescentar sessões extras de recuperação ou caminhada leve.
 - **Um estágio por semana:** 1, 2, 3, 4, 6 e 8 min de trote por bloco e,
   por fim, 30 min contínuos (`RETOMADA_ESTAGIOS_SEG`). O estágio só muda de
   uma semana para a outra, nunca entre sessões da mesma semana.
@@ -313,43 +361,20 @@ teto de 78% da FC máxima registrada (limite de "Easy" do Daniels). No
 relógio, só o pace vira alvo, no trecho de trote: num trote de 1-2 min a
 FC não sobe a tempo de avisar. A resolução planejado x realizado ignora o
 pace "no trote" (o pace médio da sessão inclui a caminhada) e trata
-"até N bpm" como teto. **Pendente:** o usuário quer que o pace e a FC
-sejam decididos pela IA, analisando a evolução dele e prevendo a semana
-seguinte -- o cálculo fixo é só pra semana de 11-17/10.
+"até N bpm" como teto. Em 2026-10-12 a ideia era passar o pace e a FC
+pra IA; **em 2026-10-14 o usuário decidiu manter em código**, com ajuste
+no próprio código quando precisar (parâmetro de carga fica na camada
+determinística). Ainda em aberto: guiar o trote por pace ou por FC/esforço
+percebido (o calor muda o custo de um mesmo pace).
 
 A estrutura de cada sessão é calculada em Python (`estado_retomada`) e
 fixada no plano depois da geração (`aplicar_retomada`) -- o LLM escolhe
 os dias e escreve o motivo, não os números. No relógio, a sessão vai como
-grupo de repetição de caminhada (passo de recuperação) + trote (intervalo),
-não como "Rodagem 30 min" (`treino_garmin._passos_retomada`).
+grupo de repetição de caminhada (passo de recuperação, sem alvo) + trote
+(intervalo, com alvo de pace), não como "Rodagem 30 min"
+(`treino_garmin._passos_retomada`).
 
 **Fontes:** [Frandsen et al. 2025 (BJSM)](https://pure.au.dk/portal/en/publications/how-much-running-is-too-much-identifying-high-risk-running-sessio/) · [comentário dos autores no blog do BJSM](https://blogs.bmj.com/bjsm/?p=11751) · [programa graduado adaptado de Warden et al. (BJSM)](https://blogs.bmj.com/bjsm/files/2019/05/Table-D-Graded-Return-to-Run-Program-for-Bone-Stress-Injury-adapted-from-Warden-et-al-2016.pdf) · [George et al., revisão de escopo de retomada após lesão óssea da tíbia](https://openrepository.aut.ac.nz/items/f860af5b-29f1-4c1d-a981-6aecc825cc55/full) · [Nielsen et al. 2014 (JOSPT)](https://vbn.aau.dk/da/publications/excessive-progression-in-weekly-running-distance-and-risk-of-runn)
-
-**Por que semanal e não diário:** o relatório roda 1x por semana (domingo).
-Uma janela diária de 7/28 dias exigiria uma "espinha" de todos os dias do
-calendário (inclusive dias sem corrida, contando como zero) só pra
-alimentar um número que só é lido semanalmente — complexidade sem
-benefício prático nesse caso de uso. A aproximação semanal (4 semanas ISO
-em vez de 28 dias corridos) entrega essencialmente o mesmo sinal com uma
-query bem mais simples, e casa com o fato de o relatório em si só existir
-1x por semana.
-
-**Por que isso importa mais que uma regra de % fixa:** a variação %
-simples (semana atual vs. anterior) trata todo mundo igual — 10% de
-aumento é "o limite" tanto pra quem treina há anos quanto pra quem está
-voltando de lesão do zero. O ACWR é relativo à sua própria base recente:
-compara o que você fez essa semana com a média do que você vem
-sustentando nas últimas 4 semanas. Isso captura dois cenários que uma
-regra fixa erra: (1) alguém com base crônica alta e estável pode absorver
-um aumento maior que 10% com segurança — o denominador (carga crônica) já
-é alto, então o mesmo aumento absoluto gera um ACWR menor; (2) alguém com
-base baixa (poucas semanas de retomada) que dá um salto de volume, mesmo
-que o salto pareça pequeno em termos absolutos, gera um ACWR alto porque o
-denominador é pequeno — é exatamente o padrão que precede reincidência de
-lesão, segundo a pesquisa de Gabbett (2-4x mais chance de lesão na semana
-seguinte quando ACWR passa de 1.5). É esse relativismo — carga de agora
-medida contra a sua própria base, não contra um número universal — que
-torna o ACWR o guardrail certo pra esse projeto.
 
 ### Disponibilidade da API do Gemini (503 "high demand") — 2026-10
 
@@ -517,12 +542,17 @@ Intervalado/Tiro. Zona é sinal direto de intensidade relativa (%FC
 máxima), o que a estrutura de split não é. Regra (implementada em
 `vw_sessoes`, coluna `tipo_treino`):
 - Zonas 4+5 ≥ 40% do tempo → **Limiar**.
-- Zonas 4+5 ≥ 20% ou zona 3 ≥ 30% → **Ritmo**.
+- Zonas 4+5 ≥ 20% ou zona 3 ≥ 30% → **Ritmo**. A regra da zona 3 não vale
+  quando o Garmin rotulou a sessão como `RECOVERY` (ajuste experimental de
+  2026-10-13, tag `AJUSTE-RITMO-RECOVERY` no `schema.sql`: caminhada +
+  trote no calor e em ladeira passou de 30% na zona 3 sem esforço de
+  ritmo).
 - Zonas 1+2 ≥ 85% do tempo e duração ≥ 35min → **Longão**.
 - Efeito anaeróbico ≥ 1.5 e zonas 4+5 ≥ 30% → **Tiro** (duração < 20min)
   ou **Intervalado** (duração ≥ 20min).
 - `efeito_treino_label = 'UNKNOWN'` → **Caminhada** (mesmo critério de
-  `classificacao_atividade`).
+  `classificacao_atividade`), e também menos de 6% do tempo correndo
+  (`RWD_RUN`): caminhada gravada no modo corrida (desde 2026-10).
 - Nenhum dos critérios acima → **Rodagem/Recuperação** (default).
 
 **Validação:** testado contra o histórico real de atividades do usuário
@@ -561,14 +591,14 @@ elite treinam, na prática, ~80% do tempo em baixa intensidade e ~20%
 em alta intensidade — não uma mistura de intensidade média (os
 chamados "junk miles"), mas uma distribuição bimodal. Adotado como
 regra fixa no prompt (`REGRAS_COMPOSICAO_SEMANA`,
-`src/analyze/analisar_com_ia.py`): no máximo 1 treino de intensidade
+`src/analyze/prompt.py`): no máximo 1 treino de intensidade
 (Ritmo, Limiar, Intervalado ou Tiro) por semana, o resto tem que ser
 Rodagem/Recuperação ou Longão.
 
 **Alternância hard/easy:** princípio clássico de treinamento
-(popularizado por Bill Bowerman, ainda referência corrente) — nunca
-dois dias de esforço seguidos sem pelo menos 1 dia de descanso entre
-eles. Evita empilhar estímulo sem recuperação suficiente entre um
+(popularizado por Bill Bowerman, ainda referência corrente). Aplicado de
+forma mais rígida: nunca dois dias de corrida seguidos, de qualquer
+intensidade -- conferido em Python, inclusive na virada da semana. Evita empilhar estímulo sem recuperação suficiente entre um
 treino forte e o próximo.
 
 **Guardrail de dor — progressão sessão a sessão, não só carga semanal
@@ -694,10 +724,10 @@ Autenticação via service account do Google Cloud
   para "Resumo Semanal"; "Atividades" passa a fazer upsert a partir da
   Fase 9 (ver seção 7) — sobrescrita total ficou cara demais conforme o
   histórico cresce.
-- [ ] Formatação (cabeçalho fixo/congelado) e validação de dados
-  (dropdown pra `dor` 0-5 e pra `localizacao`/`superficie`/`tenis`) —
-  ainda não implementado, avaliar se via código (`src/planilha.py`) ou
-  ajuste manual na planilha.
+- [ ] Formatação e validação de dados: cabeçalho colorido e congelado
+  (`aplicar_tema`) e dropdown de `dor` 0-5 (`adicionar_dropdown`) já
+  existem em `src/planilha.py`; falta dropdown pra
+  `localizacao`/`superficie`/`tenis`.
 
 ### Fase 7 — Análise com IA (`analyze/analisar_com_ia.py`)
 **Requisitos:** chamada à API Gemini (`google-genai`, modelo
@@ -709,11 +739,11 @@ provedor sem reescrever o resto -- devolve JSON validado contra o schema
 `PlanoSemanal` (`response_schema` do Gemini), não texto livre, pra dar
 pra inserir direto na planilha sem parsing frágil. Saída é o **plano da
 semana** (exatamente 7 dias, Domingo a Sábado desde 2026-10 -- antes Segunda a Domingo --, incluindo descanso;
-datas calculadas em Python via `_proxima_semana`, nunca confiadas ao
+datas calculadas em Python via `semana_alvo`, nunca confiadas ao
 LLM) -- usa o vocabulário fechado de `tipo_treino` (seção 6.1) tanto pro
 histórico quanto pra recomendação. Escrito na aba "Plano da Semana"
-(`escrever_plano`) em modo **append-only**, idempotente por data da
-segunda-feira -- cada semana é um registro histórico que se acumula, não
+(`escrever_plano`) em modo **append-only**, idempotente pelas 7 datas da
+semana -- cada semana é um registro histórico que se acumula, não
 um snapshot pra sobrescrever (diferente do dashboard da Fase 6). Só as
 7 linhas de dia vão pra planilha -- `estimativas_futuras` (tipos de
 treino sem histórico ainda, ex. Intervalado/Tiro, cada uma com
@@ -754,9 +784,10 @@ Python 3.12 -- decisão tomada nesta fase, ver seção 11; trocado por
 no mesmo workflow) e `analise_semanal.yml` (domingo, 6h BRT desde 2026-10, antes 20h -- resincroniza
 atividades/recuperação/dor na própria execução, não depende do horário
 do sync diário ter rodado antes, e gera o plano via `analisar_com_ia.py`).
-Cada passo usa `nick-fields/retry` (até 3 tentativas) antes de falhar de
-vez, só aí o e-mail padrão do GitHub de workflow agendado que falhou
-dispara. Secrets: `GARMIN_EMAIL`, `GARMIN_PASSWORD` (fallback), `GARMIN_TOKEN`
+Os passos do sync usam `nick-fields/retry` (até 3 tentativas); a geração
+do plano usa um laço próprio com espera crescente (1, 3 e 7 min, 15 min
+por tentativa) e modelos de reserva do Gemini (seção 6.1, 2026-10). Só
+depois disso o e-mail padrão do GitHub de workflow que falhou dispara. Secrets: `GARMIN_EMAIL`, `GARMIN_PASSWORD` (fallback), `GARMIN_TOKEN`
 (token de sessão já autenticado -- ver seção 11 pra por que isso funciona
 sem senha/MFA a cada run), `DATABASE_URL`, `GOOGLE_SHEET_ID`,
 `GOOGLE_SHEETS_CREDENTIALS_JSON`, `GEMINI_API_KEY`, `GEMINI_MODEL`,
@@ -765,8 +796,8 @@ sem senha/MFA a cada run), `DATABASE_URL`, `GOOGLE_SHEET_ID`,
 **Critérios de aceite:**
 - [x] Workflows escritos e validados sintaticamente (`yaml.safe_load` sem erro, jobs corretos).
 - [x] `conectar()` (`extract/garmin.py`) falha rápido com mensagem clara em CI sem senha disponível, em vez de travar esperando `input()`/`getpass()` que nunca chega (runner não tem terminal).
-- [ ] Pipeline roda ponta a ponta sem intervenção manual por pelo menos 2 semanas seguidas -- pendente do usuário configurar os Secrets (comandos no README) e deixar rodar.
-- [ ] Nenhum dado sensível (FC, sono, localização de dor) aparece em log do Actions -- por design (Secrets são mascarados automaticamente pelo GitHub, nenhum script imprime valor de Secret), falta confirmar num run real.
+- [x] Pipeline roda ponta a ponta sem intervenção manual por pelo menos 2 semanas seguidas -- os crons de 07/09 e 14/09 rodaram sozinhos, com sucesso. Falhas posteriores foram do Gemini (503), tratadas na seção 6.1.
+- [x] Nenhum dado sensível (FC, sono, localização de dor) aparece em log do Actions -- Secrets são mascarados pelo GitHub e, no Actions, o código só imprime contagens (`EM_CI`). Confirmado no log do run de 2026-10-12 ("[retomada: 1 instrução(ões) de carga/dor]").
 - [x] Nenhum commit automático de dado é gerado pelo workflow -- nenhum step chama `git commit`/`git push`, só leitura/escrita em Neon e Google Sheets.
 
 ### Fase 9 — Verificação de aderência (plano vs. treino real)
@@ -779,7 +810,9 @@ seção 11). Regra de correspondência: dia sem atividade real vira
 duração antes de comparar. Regra de aprovação: `tipo_treino` tem que
 bater exatamente, e distância/duração/pace/FC precisam estar todas dentro
 da margem (±20% distância/duração, ±30s/km pace, ±10bpm FC) para contar
-como `REALIZADO_DENTRO_DA_MARGEM` -- fora de qualquer uma delas vira
+como `REALIZADO_DENTRO_DA_MARGEM` (na retomada, o pace "no trote" não é
+comparado -- o pace médio da sessão inclui a caminhada -- e a FC
+"até N bpm" vale como teto) -- fora de qualquer uma delas vira
 `REALIZADO_FORA_DA_MARGEM`. Margens são um ponto de partida, ajustável no
 código depois de ver algumas semanas de dado real.
 
@@ -796,8 +829,9 @@ raro, sem lógica de reconciliação.
 
 As linhas de dia planejado usam uma segunda operação de upsert, por
 `data` em vez de `activity_id` (não têm atividade real associada até
-acontecerem): `analisar_com_ia.py`, no domingo, insere os 7 dias da
-semana com status `PLANEJADO`. `planilha_desempenho.py` (job diário),
+acontecerem): `analisar_com_ia.py`, no domingo, insere os dias de treino da
+semana (descanso não ganha linha) com status `PLANEJADO`. Desde 2026-10 a
+aba é reordenada por data depois de cada escrita (`ordenar_atividades`). `planilha_desempenho.py` (job diário),
 além de inserir atividades novas por `activity_id` como sempre, resolve
 a linha de dia planejado correspondente à data **estritamente passada**
 (nunca hoje -- ver bug corrigido em 2026-09-16 nesta seção) com o
@@ -835,8 +869,7 @@ do esperado (ex. observação colada por engano, bug na janela de 4
 semanas), não como limite operacional do dia a dia. Acima do teto, a
 execução aborta com mensagem clara (`RuntimeError`, mesmo padrão do
 fail-fast de `conectar()` em `extract/garmin.py`) -- sem gerar plano
-nenhum. O retry do workflow (`nick-fields/retry`, Fase 8) tenta de novo;
-se persistir, dispara o e-mail padrão do GitHub de falha de workflow
+nenhum. O retry do workflow (Fase 8) tenta de novo; se persistir, dispara o e-mail padrão do GitHub de falha de workflow
 agendado.
 
 **Critérios de aceite:**
@@ -892,11 +925,14 @@ desaquecimento -- usando `create_warmup_step`/`create_distance_interval_step`/
 `create_interval_step`/`create_cooldown_step`.
 
 Alvo do passo principal depende do tipo de treino, não uma escolha
-única fixa: Rodagem/Recuperação, Longão e Fartlek usam **FC** como alvo
-(foco em não passar do esforço seguro -- Fartlek entra aqui por não ter
-estrutura fixa de ritmo, o que importa é o esforço); Ritmo, Limiar,
-Intervalado e Tiro usam **pace** como alvo (foco em acertar o ritmo de
-prova/performance). O Garmin só aceita um tipo de alvo por passo, não os
+única fixa: Longão e Fartlek usam **FC** como alvo (foco em não passar do
+esforço seguro -- Fartlek entra aqui por não ter estrutura fixa de ritmo,
+o que importa é o esforço); Ritmo, Limiar, Intervalado e Tiro usam
+**pace** como alvo (foco em acertar o ritmo de prova/performance).
+Rodagem/Recuperação ficou **sem alvo** desde 2026-10-06 (com alvo de FC,
+o relógio mandava acelerar quando a FC ficava abaixo da faixa). Sessão de
+retomada vai como repetição de caminhada + trote, com alvo de pace só no
+trote (seção 6.1). O Garmin só aceita um tipo de alvo por passo, não os
 dois simultaneamente, mesmo que o relógio continue mostrando pace e FC
 ao vivo independente do alvo configurado.
 
@@ -948,6 +984,21 @@ investigação técnica a fazer durante a implementação.
 ### Fase 13 — Ajuste fino
 Frequência de polling, prompt, extras — a definir com base no uso real.
 
+### Próximas fases (sugestões do treinador, avaliadas em 2026-10-14)
+Ordem combinada com o usuário, depois de uma limpeza/modularização do
+código (feita em 2026-10-14):
+1. **Segurança:** sinais de alerta (dor pontual na tíbia, dor ao caminhar,
+   em repouso ou à noite) suspendem o plano e avisam pra procurar
+   avaliação; dor na tíbia separada de outros desconfortos, incluindo a
+   manhã seguinte; mesmo limiar de dor nas duas fases; 3 sessões de
+   evolução fixas na retomada + extras leves da IA.
+2. **Força na fase de retomada:** catálogo de exercícios, prescrição
+   calculada em Python, validador, coleta de esforço/RIR e teste de
+   elevação de calcanhar; treino de força no relógio.
+3. **Regras do pós-retomada:** teto semanal, uma variável de cada vez,
+   intensidade só depois de semanas estáveis, semana mais leve a cada 3-4.
+4. **Depois:** cadência só dos trechos de trote (dado ainda não coletado).
+
 ## 8. Riscos e decisões (atualizado)
 
 - **Lib não-oficial do Garmin**: risco aceito, sem alternativa madura melhor
@@ -957,8 +1008,9 @@ Frequência de polling, prompt, extras — a definir com base no uso real.
   "totalmente automático"; `repository_dispatch` via atalho no celular fica
   como gatilho manual opcional, não como requisito.
 - **Dados sensíveis**: resolvido nesta revisão — Postgres externo (Neon)
-  em vez de banco versionado no git. Repositório continua privado como
-  camada extra de proteção do código, não como proteção primária do dado.
+  em vez de banco versionado no git. O repositório ficou público em
+  2026-10; a proteção do dado nunca dependeu dele ser privado, e os logs
+  do Actions (públicos junto) não imprimem conteúdo de saúde (`EM_CI`).
 - **Custo:** resolvido — Gemini free tier (sem cartão) e Neon free tier
   (scale-to-zero, sem cartão) cobrem o volume do projeto (1 análise/semana,
   poucas atividades) com folga.
@@ -966,6 +1018,9 @@ Frequência de polling, prompt, extras — a definir com base no uso real.
   frequência (ex. corte do Gemini em fins de 2025). Mitigado pela função de
   chamada isolada (seção 4) — trocar provedor é mudança de configuração, não
   reescrita.
+- **Disponibilidade do Gemini (503 "high demand")**: sobrecarga do modelo
+  na Google, não da conta. Mitigado com modelos de reserva, cron fora do
+  pico de uso (domingo às 6h) e uma execução de reserva (seção 6.1).
 
 ## 9. Fora de escopo (por ora)
 
@@ -981,7 +1036,7 @@ Frequência de polling, prompt, extras — a definir com base no uso real.
 - Pipeline roda ponta a ponta sem intervenção manual.
 - Relatório semanal chega automaticamente todo domingo com pelo menos uma
   recomendação concreta de treino.
-- Relatório sinaliza risco de sobrecarga (ACWR fora da zona 0.8–1.3) quando aplicável.
+- Relatório sinaliza risco de sobrecarga quando aplicável (protocolo de retomada, teto por sessão e ACWR fora da zona 0.8–1.3).
 - Nenhum dado sensível commitado no GitHub a partir desta revisão.
 - Histórico consultável via SQL (Postgres) para qualquer análise futura.
 - Manter constância de treino por 4+ semanas sem recidiva de dor ≥3
