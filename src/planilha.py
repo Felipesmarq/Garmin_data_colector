@@ -6,14 +6,12 @@ essas funções. Espelha o papel de src/db.py pro lado do Postgres.
 """
 
 import os
-from pathlib import Path
 
 import gspread
-from dotenv import load_dotenv
 from google.oauth2.service_account import Credentials
 from gspread.utils import ValidationConditionType, rowcol_to_a1
 
-ROOT = Path(__file__).resolve().parent.parent
+from src.config import carregar_env
 
 ESCOPOS = ["https://www.googleapis.com/auth/spreadsheets"]
 
@@ -23,7 +21,7 @@ COR_PADRAO: Cor = (0.29, 0.29, 0.29)  # cinza-escuro, usada se a aba não pedir 
 
 
 def conectar() -> gspread.Spreadsheet:
-    load_dotenv(ROOT / ".env")
+    carregar_env()
     credenciais = Credentials.from_service_account_file(
         os.environ["GOOGLE_SHEETS_CREDENTIALS_PATH"], scopes=ESCOPOS
     )
@@ -136,6 +134,12 @@ def ordenar_decrescente(aba: gspread.Worksheet, coluna: int) -> None:
     n_linhas = len(aba.col_values(coluna))
     if n_linhas > 2:
         aba.sort((coluna, "des"), range=f"A2:{rowcol_to_a1(n_linhas, aba.col_count)}")
+
+
+def ids_na_coluna(aba: gspread.Worksheet, coluna: int = 1) -> set[int]:
+    """Valores inteiros de uma coluna de id (1-based), sem o cabeçalho e sem
+    célula vazia -- base do upsert por id nas abas (ex. `activity_id`)."""
+    return {int(v) for v in aba.col_values(coluna)[1:] if v}
 
 
 def _texto(v) -> str:

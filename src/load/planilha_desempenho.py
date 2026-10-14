@@ -18,16 +18,17 @@ FORMATADORES abaixo arredondam cada coluna pro nível de precisão que faz
 sentido pra ela antes de escrever na planilha.
 """
 
-import re
 from datetime import date, timedelta
 from functools import partial
 
-import gspread
 import psycopg
+from gspread.utils import rowcol_to_a1
 
 from src.db import conectar
 from src.email_util import enviar_email
-from src.planilha import conectar as conectar_planilha, inserir_linhas_no_topo, obter_aba, ordenar_decrescente, sobrescrever
+from src.formato import numero_br, pace_txt, parse_faixa_fc, parse_faixa_pace
+from src.planilha import conectar as conectar_planilha
+from src.planilha import ids_na_coluna, inserir_linhas_no_topo, obter_aba, ordenar_decrescente, sobrescrever
 from src.tempo import hoje_brt
 
 ABA_ATIVIDADES = "Atividades"
@@ -39,7 +40,7 @@ COLUNAS_REAIS = [
     "velocidade_media_mps", "fc_media", "fc_maxima", "cadencia_media",
     "efeito_treino_aerobico", "classificacao_atividade",
 ]
-# Colunas de dia planejado (Fase 9 -- ver analisar_com_ia.escrever_dias_planejados
+# Colunas de dia planejado (Fase 9 -- ver analyze/entrega.escrever_dias_planejados
 # e resolver_dias_planejados abaixo). Numa linha de atividade real, ficam em
 # branco; numa linha de dia planejado, as colunas de COLUNAS_REAIS além de
 # `data` ficam em branco até o dia ser resolvido -- aí `distancia_km`,
@@ -70,36 +71,11 @@ CABECALHO_RESUMO_SEMANAL = [
 ]
 
 
-def _numero(v, casas: int, remover_zero_a_direita: bool = False) -> str:
-    """Arredonda pra `casas` decimais; remover_zero_a_direita tira zero(s)
-    sobrando -- 3.00 -> "3", 3.50 -> "3.5" (pra colunas onde precisão fixa
-    só polui, tipo distância/duração).
-
-    Devolve com vírgula decimal (locale BR da planilha) -- com ponto, o
-    Sheets confunde "3.01" com data (dia.mês) em vez de número, e some o
-    ponto/mostra zero à esquerda ("03.01").
-    """
-    if v is None:
-        return ""
-    texto = f"{float(v):.{casas}f}"
-    if remover_zero_a_direita:
-        texto = texto.rstrip("0").rstrip(".")
-    return texto.replace(".", ",")
-
-
 def _pace(v) -> str:
-    """minutos por km em float (ex. 5.532) -> "M:SS" (ex. "5:32").
-
-    Prefixo `'` força a célula a ficar como texto -- sem ele, o Sheets
-    interpreta "5:32" como horário (USER_ENTERED) e mostra "05:32:00".
-    """
-    if v is None:
-        return ""
-    minutos = int(v)
-    segundos = round((float(v) - minutos) * 60)
-    if segundos == 60:
-        minutos, segundos = minutos + 1, 0
-    return f"'{minutos}:{segundos:02d}"
+    """Pace "M:SS" com prefixo `'`, que força a célula a ficar como texto --
+    sem ele, o Sheets interpreta "5:32" como horário (USER_ENTERED) e mostra
+    "05:32:00"."""
+    return "" if v is None else f"'{pace_txt(v)}"
 
 
 def _percentual(v) -> str:
@@ -108,7 +84,7 @@ def _percentual(v) -> str:
 
 def _velocidade_kmh(v) -> str:
     """m/s (bruto da Garmin, ver averageSpeed em extract/garmin.py) -> km/h."""
-    return "" if v is None else _numero(float(v) * 3.6, casas=1)
+    return "" if v is None else numero_br(float(v) * 3.6, casas=1)
 
 
 # Enums em inglês da Garmin (tipo de atividade, classificação de efeito de
@@ -143,21 +119,21 @@ def _traduzir(v, dicionario: dict[str, str]) -> str:
 
 FORMATADORES = {
     "tipo": partial(_traduzir, dicionario=TRADUCAO_TIPO),
-    "distancia_km": partial(_numero, casas=2, remover_zero_a_direita=True),
-    "duracao_min": partial(_numero, casas=1, remover_zero_a_direita=True),
+    "distancia_km": partial(numero_br, casas=2, remover_zero_a_direita=True),
+    "duracao_min": partial(numero_br, casas=1, remover_zero_a_direita=True),
     "pace_min_km": _pace,
     "velocidade_media_mps": _velocidade_kmh,
-    "cadencia_media": partial(_numero, casas=0),
-    "efeito_treino_aerobico": partial(_numero, casas=1),
+    "cadencia_media": partial(numero_br, casas=0),
+    "efeito_treino_aerobico": partial(numero_br, casas=1),
     "classificacao_atividade": partial(_traduzir, dicionario=TRADUCAO_CLASSIFICACAO),
-    "km_total": partial(_numero, casas=2, remover_zero_a_direita=True),
-    "km_corridos": partial(_numero, casas=2, remover_zero_a_direita=True),
-    "duracao_total_min": partial(_numero, casas=1, remover_zero_a_direita=True),
+    "km_total": partial(numero_br, casas=2, remover_zero_a_direita=True),
+    "km_corridos": partial(numero_br, casas=2, remover_zero_a_direita=True),
+    "duracao_total_min": partial(numero_br, casas=1, remover_zero_a_direita=True),
     "variacao_pct_km_vs_semana_anterior": _percentual,
-    "carga_cronica_km": partial(_numero, casas=2, remover_zero_a_direita=True),
-    "acwr": partial(_numero, casas=2),
-    "sono_score_medio": partial(_numero, casas=0),
-    "fc_repouso_media": partial(_numero, casas=1),
+    "carga_cronica_km": partial(numero_br, casas=2, remover_zero_a_direita=True),
+    "acwr": partial(numero_br, casas=2),
+    "sono_score_medio": partial(numero_br, casas=0),
+    "fc_repouso_media": partial(numero_br, casas=1),
 }
 
 
@@ -166,11 +142,6 @@ def _formatar_linhas(cabecalho: list[str], linhas: list[tuple]) -> list[tuple]:
         tuple(FORMATADORES[c](v) if c in FORMATADORES else v for c, v in zip(cabecalho, linha))
         for linha in linhas
     ]
-
-
-def _activity_ids_na_planilha(aba) -> set[int]:
-    valores = aba.col_values(1)[1:]  # pula cabeçalho (coluna A = activity_id)
-    return {int(v) for v in valores if v}
 
 
 def escrever_atividades(con: psycopg.Connection, spreadsheet) -> int:
@@ -190,7 +161,7 @@ def escrever_atividades(con: psycopg.Connection, spreadsheet) -> int:
         aba.clear()
         aba.append_row(CABECALHO_ATIVIDADES)
 
-    ja_na_planilha = _activity_ids_na_planilha(aba)
+    ja_na_planilha = ids_na_coluna(aba)  # coluna A = activity_id
     filtro = f"WHERE activity_id NOT IN ({','.join(map(str, ja_na_planilha))})" if ja_na_planilha else ""
     linhas = con.execute(
         f"SELECT {', '.join(COLUNAS_REAIS)} FROM vw_sessoes {filtro} ORDER BY data DESC"
@@ -220,29 +191,6 @@ def ordenar_atividades(spreadsheet) -> None:
 MARGEM_DISTANCIA_DURACAO = 0.20  # ±20%
 MARGEM_PACE_MIN_KM = 30 / 60  # ±30s/km, em minutos decimais
 MARGEM_FC_BPM = 10
-
-
-def _parse_faixa_pace(texto: str) -> tuple[float, float] | None:
-    """'10:52-12:29 min/km' (ou só '10:52 min/km') -> (min, max) em minutos
-    decimais. `pace_alvo`/`fc_alvo` do plano são texto livre (ver TreinoDia
-    em analyze/analisar_com_ia.py) -- parse tolerante, não confia em formato
-    fixo."""
-    pares = re.findall(r"(\d+):(\d{2})", texto or "")
-    if not pares:
-        return None
-    valores = [int(m) + int(s) / 60 for m, s in pares]
-    return (min(valores), max(valores))
-
-
-def _parse_faixa_fc(texto: str) -> tuple[int, int] | None:
-    """'123-133 bpm' (ou só '130 bpm') -> (min, max). 'até 150 bpm' (teto da
-    retomada) -> (0, 150): só reprova acima."""
-    valores = [int(v) for v in re.findall(r"\d+", texto or "")]
-    if not valores:
-        return None
-    if "até" in (texto or "").lower():
-        return (0, max(valores))
-    return (min(valores), max(valores))
 
 
 def _dentro_margem_percentual(planejado: float, real: float, margem: float) -> bool:
@@ -296,9 +244,9 @@ def _resolver_dia(
     # pace "no trote" (retomada) é do trecho de trote, não da sessão: o pace
     # médio da sessão inclui a caminhada e sempre sairia da faixa.
     if aprovado and "trote" not in (pace_planejado_txt or "").lower():
-        aprovado = _dentro_faixa_com_margem(_parse_faixa_pace(pace_planejado_txt), pace_real, MARGEM_PACE_MIN_KM)
+        aprovado = _dentro_faixa_com_margem(parse_faixa_pace(pace_planejado_txt), pace_real, MARGEM_PACE_MIN_KM)
     if aprovado:
-        aprovado = _dentro_faixa_com_margem(_parse_faixa_fc(fc_planejado_txt), fc_real, MARGEM_FC_BPM)
+        aprovado = _dentro_faixa_com_margem(parse_faixa_fc(fc_planejado_txt), fc_real, MARGEM_FC_BPM)
 
     status = STATUS_REALIZADO_DENTRO_DA_MARGEM if aprovado else STATUS_REALIZADO_FORA_DA_MARGEM
     return {
@@ -378,8 +326,8 @@ def resolver_dias_planejados(con: psycopg.Connection, spreadsheet) -> list[tuple
             valores_plano[COLUNAS_PLANO.index("status")] = resultado["status"]
             col_inicio = idx["status"] + 1  # 1-based
             faixa = (
-                f"{gspread.utils.rowcol_to_a1(linha_real, col_inicio)}:"
-                f"{gspread.utils.rowcol_to_a1(linha_real, len(CABECALHO_ATIVIDADES))}"
+                f"{rowcol_to_a1(linha_real, col_inicio)}:"
+                f"{rowcol_to_a1(linha_real, len(CABECALHO_ATIVIDADES))}"
             )
             atualizacoes.append({"range": faixa, "values": [valores_plano]})
             linhas_pra_remover.append(num_linha)
@@ -392,11 +340,11 @@ def resolver_dias_planejados(con: psycopg.Connection, spreadsheet) -> list[tuple
         nova_linha[idx["status"]] = resultado["status"]
         if resultado["status"] != STATUS_NAO_REALIZADO:
             nova_linha[idx["tipo"]] = resultado["tipo"]
-            nova_linha[idx["distancia_km"]] = _numero(resultado["distancia_km"], casas=2, remover_zero_a_direita=True)
-            nova_linha[idx["duracao_min"]] = _numero(resultado["duracao_min"], casas=1, remover_zero_a_direita=True)
+            nova_linha[idx["distancia_km"]] = numero_br(resultado["distancia_km"], casas=2, remover_zero_a_direita=True)
+            nova_linha[idx["duracao_min"]] = numero_br(resultado["duracao_min"], casas=1, remover_zero_a_direita=True)
             nova_linha[idx["pace_min_km"]] = _pace(resultado["pace_min_km"])
-            nova_linha[idx["fc_media"]] = _numero(resultado["fc_media"], casas=0)
-        faixa = f"A{num_linha}:{gspread.utils.rowcol_to_a1(num_linha, len(CABECALHO_ATIVIDADES))}"
+            nova_linha[idx["fc_media"]] = numero_br(resultado["fc_media"], casas=0)
+        faixa = f"A{num_linha}:{rowcol_to_a1(num_linha, len(CABECALHO_ATIVIDADES))}"
         atualizacoes.append({"range": faixa, "values": [nova_linha]})
 
     if atualizacoes:

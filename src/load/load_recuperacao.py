@@ -1,4 +1,4 @@
-"""Fase 3 — carrega recuperação diária extraída (Fase 2) no DuckDB.
+"""Fase 3 — carrega recuperação diária extraída (Fase 2) no Postgres (Neon).
 
 Idempotente: reprocessar o mesmo dia atualiza a linha em vez de duplicar
 (útil porque body battery/sono do dia atual mudam ao longo do dia — cada
@@ -7,7 +7,7 @@ sync reflete o valor mais recente).
 
 import psycopg
 
-from src.db import conectar
+from src.db import conectar, sql_upsert
 
 COLUNAS = [
     "data", "sono_total_seg", "sono_profundo_seg", "sono_leve_seg",
@@ -19,21 +19,11 @@ COLUNAS = [
 ]
 
 
-def _sql_upsert() -> str:
-    colunas_sql = ", ".join(COLUNAS)
-    placeholders = ", ".join(["%s"] * len(COLUNAS))
-    sets = ", ".join(f"{c} = excluded.{c}" for c in COLUNAS if c != "data")
-    return (
-        f"INSERT INTO stg_recuperacao_diaria ({colunas_sql}) VALUES ({placeholders}) "
-        f"ON CONFLICT (data) DO UPDATE SET {sets}"
-    )
-
-
 def carregar(con: psycopg.Connection, dias: list[dict]) -> int:
     """Insere/atualiza uma lista de dias de recuperação (extract.garmin)."""
     if not dias:
         return 0
-    sql = _sql_upsert()
+    sql = sql_upsert("stg_recuperacao_diaria", COLUNAS, "data")
     linhas = [tuple(d.get(c) for c in COLUNAS) for d in dias]
     with con.cursor() as cur:
         cur.executemany(sql, linhas)

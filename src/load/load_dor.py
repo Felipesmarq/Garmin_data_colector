@@ -18,10 +18,9 @@ semana -- não justifica separar em dois scripts/schedules):
 import gspread
 import psycopg
 
-from src.db import conectar
-from src.planilha import adicionar_dropdown, aplicar_tema
+from src.db import conectar, sql_upsert
+from src.planilha import adicionar_dropdown, aplicar_tema, ids_na_coluna, inserir_linhas
 from src.planilha import conectar as conectar_planilha
-from src.planilha import inserir_linhas
 
 ABA_DOR = "Dor"
 COR_DOR = (0.82, 0.33, 0.30)  # vermelho-coral
@@ -31,6 +30,7 @@ CABECALHO = [
     "dor", "localizacao", "comentario", "superficie", "tenis",
 ]
 COLUNA_DOR = chr(ord("A") + CABECALHO.index("dor"))  # "E"
+COLUNAS_STG_DOR = ["activity_id", "data", "dor", "localizacao", "comentario", "superficie", "tenis"]
 
 
 def obter_aba_dor(spreadsheet: gspread.Spreadsheet) -> gspread.Worksheet:
@@ -49,14 +49,9 @@ def obter_aba_dor(spreadsheet: gspread.Spreadsheet) -> gspread.Worksheet:
         return aba
 
 
-def _activity_ids_na_planilha(aba: gspread.Worksheet) -> set[int]:
-    valores = aba.col_values(1)[1:]  # pula cabeçalho
-    return {int(v) for v in valores if v}
-
-
 def exportar_pendentes(con: psycopg.Connection, aba: gspread.Worksheet) -> int:
     """Atividades sem linha em stg_dor E sem linha na planilha viram linha nova."""
-    ja_na_planilha = _activity_ids_na_planilha(aba)
+    ja_na_planilha = ids_na_coluna(aba)
     atividades = con.execute(
         "SELECT activity_id, data, nome, tipo FROM stg_atividades "
         "WHERE activity_id NOT IN (SELECT activity_id FROM stg_dor) "
@@ -68,16 +63,6 @@ def exportar_pendentes(con: psycopg.Connection, aba: gspread.Worksheet) -> int:
     linhas = [[aid, str(data), nome, tipo, "", "", "", "", ""] for aid, data, nome, tipo in novas]
     inserir_linhas(aba, linhas)
     return len(linhas)
-
-
-def _sql_upsert_dor() -> str:
-    colunas = ["activity_id", "data", "dor", "localizacao", "comentario", "superficie", "tenis"]
-    placeholders = ", ".join(["%s"] * len(colunas))
-    sets = ", ".join(f"{c} = excluded.{c}" for c in colunas if c != "activity_id")
-    return (
-        f"INSERT INTO stg_dor ({', '.join(colunas)}) VALUES ({placeholders}) "
-        f"ON CONFLICT (activity_id) DO UPDATE SET {sets}"
-    )
 
 
 def importar_preenchidas(con: psycopg.Connection, aba: gspread.Worksheet) -> int:
@@ -99,7 +84,7 @@ def importar_preenchidas(con: psycopg.Connection, aba: gspread.Worksheet) -> int
         for r in preenchidas
     ]
     with con.cursor() as cur:
-        cur.executemany(_sql_upsert_dor(), linhas)
+        cur.executemany(sql_upsert("stg_dor", COLUNAS_STG_DOR, "activity_id"), linhas)
     return len(linhas)
 
 

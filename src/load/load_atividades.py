@@ -10,7 +10,7 @@ identidade estável entre re-sincronizações.
 
 import psycopg
 
-from src.db import conectar
+from src.db import conectar, sql_upsert
 
 COLUNAS = [
     "activity_id", "activity_uuid", "data", "hora_inicio", "nome", "tipo",
@@ -34,16 +34,6 @@ COLUNAS_SPLITS = [
     "velocidade_media_mps", "velocidade_maxima_mps", "ganho_elevacao",
     "perda_elevacao",
 ]
-
-
-def _sql_upsert() -> str:
-    colunas_sql = ", ".join(COLUNAS)
-    placeholders = ", ".join(["%s"] * len(COLUNAS))
-    sets = ", ".join(f"{c} = excluded.{c}" for c in COLUNAS if c != "activity_id")
-    return (
-        f"INSERT INTO stg_atividades ({colunas_sql}) VALUES ({placeholders}) "
-        f"ON CONFLICT (activity_id) DO UPDATE SET {sets}"
-    )
 
 
 def _sql_insert_splits() -> str:
@@ -77,7 +67,7 @@ def carregar(con: psycopg.Connection, atividades: list[dict]) -> int:
     """
     if not atividades:
         return 0
-    sql = _sql_upsert()
+    sql = sql_upsert("stg_atividades", COLUNAS, "activity_id")
     linhas = [tuple(a.get(c) for c in COLUNAS) for a in atividades]
     with con.cursor() as cur:
         cur.executemany(sql, linhas)

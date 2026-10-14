@@ -32,7 +32,7 @@ from garminconnect.workout import (
     create_warmup_step,
 )
 
-from src.load.planilha_desempenho import _parse_faixa_fc, _parse_faixa_pace
+from src.formato import parse_faixa_fc, parse_faixa_pace
 
 # Baixa intensidade -> alvo de FC (o que importa é não passar do esforço
 # seguro); o resto -> alvo de pace (acertar o ritmo de prova). O Garmin só
@@ -70,7 +70,7 @@ def _nome_treino(tipo: str, data: date) -> str:
 
 
 def _alvo_fc(fc_alvo: str | None) -> tuple[dict, dict] | None:
-    faixa = _parse_faixa_fc(fc_alvo or "")
+    faixa = parse_faixa_fc(fc_alvo or "")
     if faixa is None:
         return None
     tipo = {"workoutTargetTypeId": TargetType.HEART_RATE_ZONE, "workoutTargetTypeKey": "heart.rate.zone", "displayOrder": 4}
@@ -78,7 +78,7 @@ def _alvo_fc(fc_alvo: str | None) -> tuple[dict, dict] | None:
 
 
 def _alvo_pace(pace_alvo: str | None) -> tuple[dict, dict] | None:
-    faixa = _parse_faixa_pace(pace_alvo or "")
+    faixa = parse_faixa_pace(pace_alvo or "")
     if faixa is None:
         return None
     rapido, lento = faixa  # min/km decimais: menor = mais rápido
@@ -92,7 +92,7 @@ def _alvo_pace(pace_alvo: str | None) -> tuple[dict, dict] | None:
 def _duracao_estimada_seg(dia, extra_seg: int) -> int:
     if dia.duracao_min:
         return int(dia.duracao_min * 60) + extra_seg
-    faixa = _parse_faixa_pace(dia.pace_alvo or "")
+    faixa = parse_faixa_pace(dia.pace_alvo or "")
     pace = sum(faixa) / 2 if faixa else PACE_FALLBACK_MIN_KM
     return int(dia.distancia_km * pace * 60) + extra_seg
 

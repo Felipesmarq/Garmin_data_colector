@@ -1,16 +1,16 @@
 """Fase 1 (revisão) — conexão e helpers do Postgres (Neon).
 
-Centraliza a abertura da conexão e a aplicação do schema.sql, pra
-load_atividades.py / load_recuperacao.py não duplicarem essa lógica.
+Centraliza a abertura da conexão, a aplicação do schema.sql e os helpers de
+consulta/upsert, pra os scripts de carga e de análise não duplicarem essa
+lógica.
 """
 
 import os
-from pathlib import Path
 
 import psycopg
-from dotenv import load_dotenv
 
-ROOT = Path(__file__).resolve().parent.parent
+from src.config import ROOT, carregar_env
+
 SCHEMA_PATH = ROOT / "src" / "load" / "schema.sql"
 
 
@@ -26,9 +26,25 @@ def conectar(aplicar_schema: bool = True) -> psycopg.Connection:
     tornam a aplicação segura de rodar toda vez, mesmo com o banco já
     populado.
     """
-    load_dotenv(ROOT / ".env")
+    carregar_env()
     database_url = os.environ["DATABASE_URL"]
     con = psycopg.connect(database_url, autocommit=True)
     if aplicar_schema:
         con.execute(SCHEMA_PATH.read_text(encoding="utf-8"))
     return con
+
+
+def consultar(con: psycopg.Connection, sql: str, params: tuple = ()) -> tuple[list[str], list[tuple]]:
+    """(nomes das colunas, linhas) de uma consulta."""
+    cur = con.execute(sql, params)
+    return [d.name for d in cur.description], cur.fetchall()
+
+
+def sql_upsert(tabela: str, colunas: list[str], chave: str) -> str:
+    """INSERT ... ON CONFLICT (chave) DO UPDATE de todas as outras colunas --
+    reprocessar o mesmo registro atualiza em vez de duplicar."""
+    sets = ", ".join(f"{c} = excluded.{c}" for c in colunas if c != chave)
+    return (
+        f"INSERT INTO {tabela} ({', '.join(colunas)}) VALUES ({', '.join(['%s'] * len(colunas))}) "
+        f"ON CONFLICT ({chave}) DO UPDATE SET {sets}"
+    )

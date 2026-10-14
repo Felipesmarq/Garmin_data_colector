@@ -17,12 +17,9 @@ Uso típico (de outro script):
 
 import getpass
 import os
-import sys
-from datetime import date, datetime, timedelta
-from pathlib import Path
+from datetime import date, timedelta
 from typing import Optional
 
-from dotenv import load_dotenv
 from garminconnect import (
     Garmin,
     GarminConnectAuthenticationError,
@@ -30,9 +27,9 @@ from garminconnect import (
     GarminConnectTooManyRequestsError,
 )
 
+from src.config import ROOT, carregar_env
 from src.tempo import hoje_brt
 
-ROOT = Path(__file__).resolve().parent.parent.parent
 TOKENSTORE = str(ROOT / ".garmin_tokens")
 MAX_LOGIN_ATTEMPTS = 5
 
@@ -58,7 +55,7 @@ def conectar() -> Garmin:
     except (GarminConnectAuthenticationError, GarminConnectConnectionError, FileNotFoundError):
         pass  # sem token válido — segue pro login com email/senha
 
-    load_dotenv(ROOT / ".env")
+    carregar_env()
     email = os.getenv("GARMIN_EMAIL")
     senha_env = os.getenv("GARMIN_PASSWORD")
 
