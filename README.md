@@ -72,8 +72,8 @@ projeto pra rodar e testar:
 
 - **Contexto do corredor no prompt.** O texto enviado ao Gemini descreve o
   autor do projeto: um corredor em retomada depois de uma canelite. Esse
-  contexto está fixo em `_construir_prompt`, em
-  [`src/analyze/analisar_com_ia.py`](src/analyze/analisar_com_ia.py), e
+  contexto está fixo em `construir_prompt`, em
+  [`src/analyze/prompt.py`](src/analyze/prompt.py), e
   orienta o plano inteiro. Reescreva com a sua situação.
 - **Fuso horário.** O projeto usa o horário de Brasília
   (`America/Sao_Paulo`, em [`src/tempo.py`](src/tempo.py)). Os horários
@@ -334,17 +334,30 @@ enquanto -- não influencia a geração do plano seguinte.
 │   ├── output/                 # JSON bruto de amostra (gitignored)
 │   └── RELATORIO_FASE0.md
 ├── src/
-│   ├── db.py                   # conexão Postgres (Neon) + aplica schema.sql
+│   ├── config.py               # raiz do projeto, leitura do .env, flag de GitHub Actions
+│   ├── db.py                   # conexão Postgres (Neon) + aplica schema.sql + helpers de consulta/upsert
 │   ├── planilha.py              # conexão Google Sheets + abas/linhas (mecânica genérica, sem regra de negócio)
+│   ├── formato.py              # pace, números com vírgula, leitura de faixas de pace/FC
 │   ├── email_util.py           # envio de e-mail via Gmail SMTP (mecânica genérica)
+│   ├── tempo.py                # "hoje" no horário de Brasília
 │   ├── extract/garmin.py       # puxa atividades (+ splits run/walk) e recuperação diária da API
 │   ├── load/
 │   │   ├── schema.sql          # DDL: staging -> vw_sessoes -> vw_sessoes_ia -> vw_resumo_semanal
 │   │   ├── load_atividades.py  # upsert de atividades + splits
 │   │   ├── load_recuperacao.py
 │   │   ├── load_dor.py         # aba "Dor": exporta pendentes + importa preenchidas em stg_dor
-│   │   └── planilha_desempenho.py  # "Atividades" (upsert) + "Resumo Semanal" (snapshot) + verificação de aderência (Fase 9)
-│   └── analyze/analisar_com_ia.py  # plano semanal via Gemini + guardrails, aba "Plano da Semana"
+│   │   ├── planilha_desempenho.py  # "Atividades" (upsert) + "Resumo Semanal" (snapshot) + verificação de aderência (Fase 9)
+│   │   └── treino_garmin.py    # envia o plano ao relógio como treino estruturado (Fase 12)
+│   └── analyze/                # plano semanal via Gemini
+│       ├── analisar_com_ia.py  # ponto de entrada: contexto -> geração -> conferência -> revisão -> entrega
+│       ├── semana.py           # datas da semana (domingo a sábado)
+│       ├── contexto.py         # tudo que o plano precisa, lido do banco e da planilha
+│       ├── retomada.py         # protocolo de Warden (um estágio por semana)
+│       ├── guardrails.py       # ACWR, teto por sessão, dor + conferência do plano em Python
+│       ├── prompt.py           # texto do prompt e da revisão
+│       ├── gemini.py           # chamadas ao Gemini, com modelos de reserva
+│       ├── modelos.py          # formato das sessões, do plano e da revisão
+│       └── entrega.py          # aba "Plano da Semana", dias planejados, texto e e-mail
 ├── Dockerfile · docker-compose.yml · .dockerignore  # só pra dev local, não usado em produção
 ├── pyproject.toml · uv.lock · .env.example · .gitignore
 └── docs/

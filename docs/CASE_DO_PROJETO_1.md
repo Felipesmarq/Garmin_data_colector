@@ -252,8 +252,8 @@ causa), com corredores em geral, não especificamente pós-lesão.
 
 O que o projeto faz com isso: fora da retomada (abaixo), cada sessão do
 plano tem teto de **110% da sessão mais longa (em km corridos) dos últimos
-30 dias** (`_instrucao_teto_sessao`), conferido em Python no plano
-devolvido (`_violacoes_regras`). O ACWR continua no prompt como guardrail
+30 dias** (`instrucao_teto_sessao`), conferido em Python no plano
+devolvido (`violacoes_regras`). O ACWR continua no prompt como guardrail
 secundário, já que a evidência a favor dele enfraqueceu.
 
 ### Retomada pós-canelite (protocolo de Warden, um estágio por semana)
@@ -287,7 +287,7 @@ depois dela:
   por fim, 30 min contínuos (`RETOMADA_ESTAGIOS_SEG`). O estágio só muda de
   uma semana para a outra, nunca entre sessões da mesma semana.
 - **A base é o estágio prescrito, não o trote detectado**
-  (`_trote_prescrito`, lido do motivo gravado na aba "Plano da Semana"): o
+  (`trote_prescrito`, lido do motivo gravado na aba "Plano da Semana"): o
   trote detectado pelo Garmin só confirma que o estágio foi cumprido (90%
   do prescrito, folga pro erro de detecção). Trotar além do prescrito não
   pula estágio -- na semana de 11/10, o corredor trotou 1:53 por bloco num
@@ -306,7 +306,7 @@ depois dela:
 
 **Pace e FC do trote (provisório, 2026-10-12):** a primeira versão não
 dava alvo nenhum na retomada, e o corredor ficou sem referência. Hoje é
-determinístico (`_referencias_trote`): pace = mediana do pace dos trechos
+determinístico (`referencias_trote`): pace = mediana do pace dos trechos
 de corrida (RWD_RUN) das sessões de Rodagem/Recuperação dos últimos 180
 dias, arredondada pra baixo em 15s, com 30s de folga pro lado lento; FC =
 teto de 78% da FC máxima registrada (limite de "Easy" do Daniels). No
@@ -317,8 +317,8 @@ pace "no trote" (o pace médio da sessão inclui a caminhada) e trata
 sejam decididos pela IA, analisando a evolução dele e prevendo a semana
 seguinte -- o cálculo fixo é só pra semana de 11-17/10.
 
-A estrutura de cada sessão é calculada em Python (`_estado_retomada`) e
-fixada no plano depois da geração (`_aplicar_retomada`) -- o LLM escolhe
+A estrutura de cada sessão é calculada em Python (`estado_retomada`) e
+fixada no plano depois da geração (`aplicar_retomada`) -- o LLM escolhe
 os dias e escreve o motivo, não os números. No relógio, a sessão vai como
 grupo de repetição de caminhada (passo de recuperação) + trote (intervalo),
 não como "Rodagem 30 min" (`treino_garmin._passos_retomada`).
@@ -579,7 +579,7 @@ Protocolos de retomada pós-MTSS/canelite documentados em medicina
 esportiva seguem uma lógica de fases: avança intensidade só depois de
 sessões consecutivas sem dor; se a dor voltar, regride uma fase
 inteira. Implementado como segundo guardrail determinístico
-(`_instrucao_guardrail_dor`, mesmo padrão do guardrail de ACWR — Python
+(`instrucao_guardrail_dor`, mesmo padrão do guardrail de ACWR — Python
 calcula, prompt recebe instrução obrigatória, não sugestão): se a dor
 mais recente registrada em `stg_dor` for **nível 2 ou mais** (escala
 0-5), a semana inteira fica restrita a Rodagem/Recuperação ou Longão,
@@ -721,17 +721,17 @@ treino sem histórico ainda, ex. Intervalado/Tiro, cada uma com
 `logica_geral` não têm "1 dia" pra ocupar numa tabela histórica, então
 vão só pro terminal e pro **e-mail semanal** (`enviar_email_resumo`,
 Gmail SMTP via `smtplib` da biblioteca padrão -- zero dependência nova).
-Prompt também lê a aba "Observações" (`_observacoes_recentes`) -- texto
+Prompt também lê a aba "Observações" (`observacoes_recentes`) -- texto
 livre por semana, 100% preenchido pelo usuário, nunca escrito pelo
 script, mesma janela de 4 semanas dos outros dados.
 
 Guardrails determinísticos em Python, não uma aposta em o modelo
 perceber sozinho, em dois regimes de carga: em retomada,
-`_instrucao_retomada` (protocolo de Warden, um estágio por semana, ver "Retomada pós-canelite" na seção 6.1); fora dela,
-`_instrucao_teto_sessao` (sessão até 110% da mais longa dos últimos 30
-dias, Frandsen et al. 2025) e `_instrucao_guardrail_acwr` (ACWR em km
+`instrucao_retomada` (protocolo de Warden, um estágio por semana, ver "Retomada pós-canelite" na seção 6.1); fora dela,
+`instrucao_teto_sessao` (sessão até 110% da mais longa dos últimos 30
+dias, Frandsen et al. 2025) e `instrucao_guardrail_acwr` (ACWR em km
 corridos, só dispara acima de 1.3, nunca pra ACWR baixo). Em ambos,
-`_instrucao_guardrail_dor` (progressão sessão a sessão -- trava
+`instrucao_guardrail_dor` (progressão sessão a sessão -- trava
 intensidade se a dor mais recente registrada foi >= 2, protocolo de
 retomada pós-canelite, seção 6.1). `REGRAS_COMPOSICAO_SEMANA`
 (distribuição polarizada 80/20 + alternância hard/easy, seção 6.1)
@@ -845,16 +845,16 @@ agendado.
 - [x] A contagem usa a API do Gemini (`count_tokens`), não uma aproximação local. Confirmado por leitura do código e pelos testes acima.
 
 ### Fase 11 — Revisão de coerência do plano gerado
-**Requisitos:** depois de `_plano_semanal()` validar o schema (7 dias),
+**Requisitos:** depois de `plano_semanal()` validar o schema (7 dias),
 uma segunda chamada ao Gemini (`revisar_coerencia`, isolada de
 `gerar_analise` -- não autoavaliação na mesma resposta, ver seção 11)
-recebe o prompt original + o plano gerado (em texto, via `_texto_plano`)
+recebe o prompt original + o plano gerado (em texto, via `texto_plano`)
 e devolve um veredito estruturado via `response_schema` próprio
 (`RevisaoCoerencia`: `coerente: bool`, `motivo: str`,
 `problemas: list[str]`) -- mesmo padrão de saída estruturada já usado na
 geração do plano, não texto livre. Quais guardrails dispararam **não** é
 passado como argumento separado -- já vem embutido no prompt original
-(`instrucoes_guardrail` já é concatenado em `_construir_prompt`), então
+(`instrucoes_guardrail` já é concatenado em `construir_prompt`), então
 reenviar o prompt inteiro pro revisor já carrega essa informação, sem
 duplicar. A revisão cobre três coisas: inconsistência interna (o
 `motivo` de um dia não bate com o tipo/distância/intensidade

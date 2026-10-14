@@ -1,1177 +1,102 @@
-"""Fase 7 — análise semanal com IA (Gemini) a partir de vw_sessoes_ia + vw_resumo_semanal.
+"""Fase 7 — análise semanal com IA (Gemini): gera, confere, revisa e entrega
+o plano da semana. Ponto de entrada do workflow `analise_semanal.yml`
+(`python -m src.analyze.analisar_com_ia`); a lógica fica nos módulos:
 
-`gerar_analise(prompt) -> texto` é a única função que fala com o provedor de
-LLM -- trocar de Gemini pra outro provedor é reescrever só essa função (ver
-CASE_DO_PROJETO_1.md seção 4).
-
-Guardrails (seção 6.1) não dependem do modelo "perceber" risco sozinho --
-calculados em Python e injetados como instrução obrigatória no prompt, não
-uma aposta em o LLM notar um número no meio da tabela. Dois regimes de
-carga: em retomada (`_estado_retomada` -- ainda sem sessão de ~30 min de
-trote nos últimos 30 dias) a semana segue o protocolo de Warden, um
-estágio por semana (`_instrucao_retomada`); fora dela,
-ACWR em km corridos (`_instrucao_guardrail_acwr`) + teto por sessão de
-Frandsen et al. 2025 (`_instrucao_teto_sessao`). Por cima dos dois,
-`_instrucao_guardrail_dor` (trava intensidade se a dor mais recente
-registrada foi >= 2). As regras de contagem/dias/teto também são
-conferidas em Python no plano devolvido (`_violacoes_regras`), não só
-pedidas no prompt. Regras de composição da
-semana (REGRAS_COMPOSICAO_SEMANA -- distribuição polarizada 80/20 e
-alternância hard/easy) existem especificamente pra reduzir variação
-arbitrária entre gerações sucessivas do plano.
-
-Janela de contexto: 4 semanas (JANELA_SEMANAS) -- mesma unidade que a carga
-crônica do ACWR já usa (mesociclo padrão na ciência do esporte) e evita
-estourar o prompt com histórico irrelevante conforme o projeto cresce
-(degradação de raciocínio do LLM com contexto poluído, seção 6.1). Valor
-fácil de ajustar/testar, não uma verdade definitiva.
+- `semana`: datas da semana a planejar (domingo a sábado).
+- `contexto`: tudo que o plano precisa, lido do banco e da planilha.
+- `retomada` e `guardrails`: regras de carga e dor em Python, injetadas
+  como instrução obrigatória no prompt e conferidas no plano devolvido
+  (`violacoes_regras`) -- não uma aposta em o LLM perceber o risco sozinho.
+  Dois regimes: em retomada, protocolo de Warden (um estágio por semana);
+  fora dela, teto por sessão de Frandsen et al. 2025 + ACWR em km corridos.
+- `prompt`: texto do prompt e da revisão de coerência.
+- `gemini`: a única parte que fala com o provedor de LLM.
+- `entrega`: planilha, texto do plano e e-mail (o relógio fica em
+  src/load/treino_garmin.py).
 """
 
 import os
-import re
-from datetime import date, timedelta
-from decimal import Decimal
-from pathlib import Path
 
-import gspread
-import psycopg
-from dotenv import load_dotenv
-from google import genai
-from google.genai import errors, types
-from pydantic import BaseModel
-
-from src.db import conectar
-from src.email_util import enviar_email
-from src.extract.garmin import conectar as conectar_garmin
-from src.load.treino_garmin import enviar_plano as enviar_plano_garmin
-from src.tempo import hoje_brt
-from src.load.planilha_desempenho import (
-    ABA_ATIVIDADES,
-    CABECALHO_ATIVIDADES,
-    COLUNAS_REAIS,
-    COR_ATIVIDADES,
-    STATUS_PLANEJADO,
-    ordenar_atividades,
+from src.analyze.contexto import ContextoSemana, carregar_contexto
+from src.analyze.entrega import (
+    ABA_PLANO,
+    apagar_plano_da_semana,
+    enviar_email_resumo,
+    escrever_dias_planejados,
+    escrever_plano,
+    imprimir_plano,
+    plano_ja_escrito,
+    texto_plano,
 )
-from src.planilha import conectar as conectar_planilha, inserir_linhas, inserir_linhas_no_topo, obter_aba
-
-ROOT = Path(__file__).resolve().parent.parent.parent
-
-JANELA_SEMANAS = 4
-MODELO_PADRAO = "gemini-3.8-flash"
-
-# Sobrecarga do Gemini (503 "high demand") é por modelo e dura mais que as
-# 5 tentativas que o SDK já faz sozinho -- então, esgotadas elas, tenta o
-# próximo modelo da lista em vez de desistir (ver _gerar_json e
-# CASE_DO_PROJETO_1.md, 2026-10). 429 entra junto: a cota também é por modelo.
-MODELOS_RESERVA = ("gemini-3.7-flash", "gemini-3.6-flash")
-CODIGOS_SOBRECARGA = (429, 500, 502, 503, 504)
-
-# Fase 10 -- teto de tokens do prompt, bem abaixo do limite real do Gemini
-# (até 1M) -- ver gerar_analise().
-TETO_TOKENS = 200_000
+from src.analyze.gemini import gerar_analise, revisar_coerencia
+from src.analyze.guardrails import violacoes_regras
+from src.analyze.modelos import PlanoSemanal, plano_semanal
+from src.analyze.retomada import SessaoRetomada, aplicar_retomada
+from src.analyze.semana import semana_alvo
+from src.config import EM_CI
+from src.db import conectar
+from src.extract.garmin import conectar as conectar_garmin
+from src.load.planilha_desempenho import ABA_ATIVIDADES, STATUS_PLANEJADO, ordenar_atividades
+from src.load.treino_garmin import enviar_plano as enviar_plano_garmin
+from src.planilha import conectar as conectar_planilha
+from src.tempo import hoje_brt
 
 # Fase 11 -- máximo de tentativas (gerar + revisar) antes de desistir e
-# abortar, sem cair num plano de fallback fixo -- ver __main__.
+# abortar, sem cair num plano de fallback fixo -- ver gerar_plano.
 MAX_TENTATIVAS_REVISAO = 3
 
-# A semana do plano vai de domingo a sábado (o cron roda domingo às 6h, ver
-# analise_semanal.yml) -- não é a semana ISO.
-DIAS_SEMANA_PT = ["Domingo", "Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado"]
 
-# O repositório é público, e com ele os logs do GitHub Actions. No Actions, o
-# log não mostra conteúdo de saúde (plano com os motivos, nível de dor,
-# justificativa da revisão) -- isso já chega completo por e-mail, planilha e
-# relógio. Rodando local, tudo continua sendo impresso.
-EM_CI = bool(os.environ.get("GITHUB_ACTIONS"))
-
-ZONA_SEGURA_MIN = 0.8
-ZONA_SEGURA_MAX = 1.3
-ZONA_ALERTA_REFORCADO = 1.5
-
-# Retomada pós-canelite -- protocolo de Warden et al. puro: 3 blocos de 10
-# min de caminhada + trote, em dias alternados, subindo um estágio por
-# semana (todas as sessões da semana no mesmo estágio). A regra dos 10%
-# (Frandsen) só vale depois da retomada: é estudo de corredor saudável em
-# treino regular, não de readaptação (decisão do usuário, 2026-10-13 -- ver
-# CASE_DO_PROJETO_1.md seção 6.1, "Retomada"). O número de sessões é
-# decisão do LLM, até o que a regra de alternância permite.
-RETOMADA_BLOCOS = 3
-RETOMADA_BLOCO_SEG = 10 * 60
-# Trote por bloco em cada estágio: 9/1, 8/2, 7/3, 6/4, 4/6, 2/8 min e, por
-# fim, 30 min contínuos (600 = bloco inteiro de trote).
-RETOMADA_ESTAGIOS_SEG = (60, 120, 180, 240, 360, 480, 600)
-# Estágio cumprido = a maior sessão da semana teve pelo menos 90% do trote
-# prescrito (folga pro erro de detecção corrida/caminhada do Garmin).
-RETOMADA_CUMPRIDO_FRACAO = 0.9
-# Referências do trote na retomada, do próprio corredor (não tabela genérica):
-# pace = mediana do pace dos trechos de corrida (RWD_RUN) das sessões de
-# Rodagem/Recuperação recentes, arredondada pra baixo em 15s, com 30s de
-# folga pro lado lento; FC = teto de "Easy" do Daniels (78% da FC máxima já
-# registrada). O pace vira alvo do trecho de trote no relógio; a FC fica só
-# no plano (no trote de 1-2 min ela não chega a subir a tempo de avisar).
-JANELA_REFERENCIA_TROTE_DIAS = 180
-TROTE_MIN_SEG_REFERENCIA = 120  # sessão com menos trote que isso não serve de referência de pace
-FOLGA_PACE_TROTE_MIN = 0.5
-FC_TETO_FRACAO_MAX = 0.78
-# Fim da retomada: alguma sessão com ~30 min de trote nos últimos 30 dias.
-RETOMADA_FIM_TROTE_SEG = 0.95 * RETOMADA_BLOCOS * RETOMADA_BLOCO_SEG
-# Regra de dor do protocolo: qualquer dor registrada volta um degrau.
-LIMIAR_DOR_RETOMADA = 1
-
-# Fora da retomada -- Frandsen et al. 2025 (BJSM): sessão mais de 10% maior
-# que a mais longa dos últimos 30 dias aumentou a taxa de lesão por
-# sobrecarga; ACWR e variação semana a semana não mostraram relação.
-JANELA_SESSAO_DIAS = 30
-AUMENTO_SESSAO_MAX = 0.10
-
-# Vocabulário fechado de tipos de treino -- baseado no sistema de Jack
-# Daniels (Daniels' Running Formula), referência padrão em ciência do
-# esporte pra treino de corrida, com % de VO2max por tipo. Nomenclatura em
-# português como usada no Brasil (rodagem, tiro, longão) mapeada 1:1 pro
-# sistema E/M/T/I/R + fartlek. Fechado de propósito: sem isso, o modelo
-# tende a recomendação vaga ("corra mais forte") em vez de um tipo de
-# treino com protocolo e propósito fisiológico definidos.
-TIPOS_DE_TREINO = """\
-- Rodagem/Recuperação (Easy, 65-78% VO2max): ritmo confortável, conversável -- base aeróbica e recuperação entre treinos fortes.
-- Longão (Easy estendido, 65-78% VO2max): mesma intensidade da rodagem, distância/duração maior -- resistência aeróbica e adaptação de volume.
-- Ritmo/Tempo Run (Marathon, 80-84% VO2max): ritmo sustentável por prova longa.
-- Limiar (Threshold, 88-92% VO2max): contínuo ou em blocos longos (20-40min totais) -- eleva o limiar de lactato.
-- Intervalado (Interval, 95-100% VO2max): repetições de 3-5min com recuperação incompleta -- maximiza VO2max.
-- Tiro (Repetition, acima de 100% VO2max, ritmo de milha): repetições curtas com recuperação completa -- potência anaeróbica, velocidade, economia de corrida.
-- Fartlek (intensidade variável, sem estrutura fixa): variação livre de ritmo, recuperação em trote leve (não parado) -- mistura estímulo aeróbico/anaeróbico.\
-"""
-
-
-class TreinoDia(BaseModel):
-    dia_semana: str  # "Domingo".."Sábado", só pra o modelo se situar -- a data real é atribuída em Python (_semana_alvo), nunca confiada ao LLM
-    descanso: bool
-    tipo_treino: str | None = None  # da lista TIPOS_DE_TREINO, ou None se descanso
-    distancia_km: float | None = None
-    duracao_min: float | None = None
-    pace_alvo: str | None = None  # "10:52-12:29 min/km"
-    fc_alvo: str | None = None  # "123-133 bpm"
-    motivo: str
-
-
-class EstimativaFutura(BaseModel):
-    """Tipos de treino sem histórico do corredor ainda (ex. Intervalado,
-    Tiro) -- referência pra quando ele for tentar, não faz parte do plano
-    da semana em si."""
-    tipo_treino: str
-    pace_alvo: str
-    fc_alvo: str
-    prazo_estimado: str  # critério/tempo explícito pra chegar lá, não "no futuro"
-    nota: str
-
-
-class PlanoSemanal(BaseModel):
-    dias: list[TreinoDia]
-    estimativas_futuras: list[EstimativaFutura] = []
-    logica_geral: str
-
-
-class RevisaoCoerencia(BaseModel):
-    """Fase 11 -- veredito estruturado da segunda chamada ao Gemini
-    (revisar_coerencia), não texto livre -- mesmo padrão de saída
-    estruturada da geração do plano."""
-    coerente: bool
-    motivo: str
-    problemas: list[str] = []
-
-
-def _semana_alvo() -> list[date]:
-    """Domingo a sábado da semana a planejar -- calculado em Python, não
-    pedido ao LLM (aritmética de data não é trabalho pra prompt).
-
-    Por padrão é a semana que começa no próximo domingo -- o próprio dia,
-    quando roda no domingo (o cron roda domingo às 6h, planejando a semana
-    que começa ali). A variável de ambiente SEMANA_PLANO=atual muda pra
-    semana já começada (domingo mais recente): serve pra reexecução manual
-    quando o cron falhou (ver workflow_dispatch em analise_semanal.yml); os
-    dias que já passaram viram descanso (ver _dias_passados).
-
-    `hoje_brt()`, não `date.today()`: o servidor do GitHub Actions roda em
-    UTC, e um atraso de agendamento no cron (comum no GitHub Actions) já
-    pulou a semana inteira uma vez (bug real, ver CASE_DO_PROJETO_1.md
-    seção 11)."""
-    hoje = hoje_brt()
-    if os.environ.get("SEMANA_PLANO") == "atual":
-        domingo = hoje - timedelta(days=(hoje.weekday() + 1) % 7)
-    else:
-        domingo = hoje + timedelta(days=(6 - hoje.weekday()) % 7)
-    return [domingo + timedelta(days=i) for i in range(7)]
-
-
-def _dias_passados(dias: list[date]) -> list[date]:
-    """Dias da semana a planejar anteriores a hoje (só acontece com
-    SEMANA_PLANO=atual) -- têm que ser descanso no plano."""
-    hoje = hoje_brt()
-    return [d for d in dias if d < hoje]
-
-
-def _consultar(con: psycopg.Connection, sql: str, params: tuple = ()) -> tuple[list[str], list[tuple]]:
-    cur = con.execute(sql, params)
-    colunas = [d.name for d in cur.description]
-    return colunas, cur.fetchall()
-
-
-def _formatar_valor(v) -> str:
-    """Arredonda float/Decimal pra 2 casas (sem zero à direita) -- números
-    crus tipo 4.5746201171875 ou 91.0000000000000000 (AVG() do Postgres
-    devolve Decimal, não float) são ruído puro pro prompt, só gastam token."""
-    if v is None:
-        return ""
-    if isinstance(v, (float, Decimal)):
-        return f"{float(v):.2f}".rstrip("0").rstrip(".")
-    return str(v)
-
-
-def _formatar_tabela(colunas: list[str], linhas: list[tuple]) -> str:
-    cabecalho = " | ".join(colunas)
-    corpo = "\n".join(" | ".join(_formatar_valor(v) for v in linha) for linha in linhas)
-    return f"{cabecalho}\n{corpo}" if linhas else f"{cabecalho}\n(sem atividades no período)"
-
-
-def _pace_txt(min_km: float) -> str:
-    minutos = int(min_km)
-    segundos = round((min_km - minutos) * 60)
-    if segundos == 60:
-        minutos, segundos = minutos + 1, 0
-    return f"{minutos}:{segundos:02d}"
-
-
-def _faixas_por_tipo(colunas: list[str], linhas: list[tuple]) -> str:
-    """Pace/FC que o corredor já demonstrou de verdade em cada tipo_treino,
-    na mesma janela do prompt -- %VO2max não é mensurável durante a
-    corrida; pace e FC são (aparecem ao vivo no relógio). Referência
-    pessoal, não uma tabela de VDOT genérica -- não exige VO2max/limiar
-    calibrado, que não temos (ver limitação em CASE_DO_PROJETO_1.md
-    seção 6.1)."""
-    idx_tipo = colunas.index("tipo_treino")
-    idx_pace = colunas.index("pace_min_km")
-    idx_fc = colunas.index("fc_media")
-
-    por_tipo: dict[str, list[tuple[float, float]]] = {}
-    for linha in linhas:
-        tipo, pace, fc = linha[idx_tipo], linha[idx_pace], linha[idx_fc]
-        if tipo is None or tipo == "Caminhada" or pace is None or fc is None:
-            continue
-        por_tipo.setdefault(tipo, []).append((float(pace), float(fc)))
-
-    if not por_tipo:
-        return "(sem histórico suficiente ainda pra estimar faixas de pace/FC por tipo)"
-
-    linhas_txt = []
-    for tipo, valores in sorted(por_tipo.items()):
-        paces = [v[0] for v in valores]
-        fcs = [v[1] for v in valores]
-        linhas_txt.append(
-            f"- {tipo}: pace {_pace_txt(min(paces))}-{_pace_txt(max(paces))} min/km, "
-            f"FC {round(min(fcs))}-{round(max(fcs))} bpm ({len(valores)} sessão(ões) na janela)"
-        )
-    return "\n".join(linhas_txt)
-
-
-ABA_OBSERVACOES = "Observações"
-COR_OBSERVACOES = (0.85, 0.60, 0.10)  # âmbar
-CABECALHO_OBSERVACOES = ["semana_inicio", "observacao"]
-
-
-def _observacoes_recentes(spreadsheet: gspread.Spreadsheet) -> str:
-    """Aba "Observações" -- texto livre por semana, preenchido manualmente
-    pelo usuário (nunca escrita pelo script, só lida). Cria a aba com
-    cabeçalho na primeira vez se ainda não existir; não insere linha
-    nenhuma -- é 100% input manual, mesmo espírito da aba "Dor" mas sem a
-    parte de export."""
-    aba = obter_aba(spreadsheet, ABA_OBSERVACOES, CABECALHO_OBSERVACOES, cor=COR_OBSERVACOES)
-    corte = hoje_brt() - timedelta(weeks=JANELA_SEMANAS)
-    recentes = []
-    for registro in aba.get_all_records():
-        semana_txt = str(registro.get("semana_inicio", "")).strip()
-        observacao = str(registro.get("observacao", "")).strip()
-        if not semana_txt or not observacao:
-            continue
-        try:
-            semana = date.fromisoformat(semana_txt)
-        except ValueError:
-            continue
-        if semana >= corte:
-            recentes.append(f"- semana de {semana_txt}: {observacao}")
-    return "\n".join(recentes) if recentes else "(nenhuma observação registrada nas últimas semanas)"
-
-
-def _acwr_semana_atual(colunas: list[str], linhas_resumo: list[tuple]) -> float | None:
-    """linhas_resumo já em ordem cronológica -- a última é a semana mais recente."""
-    if not linhas_resumo:
-        return None
-    valor = linhas_resumo[-1][colunas.index("acwr")]
-    return float(valor) if valor is not None else None
-
-
-def _mmss(segundos: int) -> str:
-    return f"{segundos // 60}:{segundos % 60:02d}"
-
-
-class SessaoRetomada(BaseModel):
-    """Estrutura de cada sessão da semana em retomada (todas iguais) --
-    calculada em Python, nunca pedida ao LLM."""
-    blocos: int
-    caminhada_seg: int  # por bloco
-    trote_seg: int  # por bloco; 0 = sessão só de caminhada
-    pace_trote: tuple[float, float] | None = None  # min/km decimais (rápido, lento)
-    fc_teto: int | None = None
-
-    def texto_pace(self) -> str | None:
-        """'8:15-8:45 min/km no trote' -- o "no trote" faz a resolução do
-        planejado x realizado ignorar o pace (o pace médio da sessão inclui
-        a caminhada, ver planilha_desempenho._resolver_dia)."""
-        if self.trote_seg == 0 or self.pace_trote is None:
-            return None
-        rapido, lento = self.pace_trote
-        return f"{_pace_txt(rapido)}-{_pace_txt(lento)} min/km no trote"
-
-    def texto_fc(self) -> str | None:
-        return f"até {self.fc_teto} bpm" if self.fc_teto else None
-
-    @property
-    def duracao_min(self) -> float:
-        return self.blocos * (self.caminhada_seg + self.trote_seg) / 60
-
-    def descricao(self) -> str:
-        if self.trote_seg == 0:
-            return f"caminhada de {self.duracao_min:.0f} min, sem trote"
-        if self.caminhada_seg == 0:
-            return f"{self.duracao_min:.0f} min de trote contínuo"
-        return f"{self.blocos}x (caminhe {_mmss(self.caminhada_seg)} + trote {_mmss(self.trote_seg)})"
-
-
-def _montar_sessao(trote_por_bloco: int) -> SessaoRetomada:
-    total = RETOMADA_BLOCOS * RETOMADA_BLOCO_SEG
-    if trote_por_bloco <= 0:
-        return SessaoRetomada(blocos=1, caminhada_seg=total, trote_seg=0)
-    if trote_por_bloco >= RETOMADA_BLOCO_SEG:
-        return SessaoRetomada(blocos=1, caminhada_seg=0, trote_seg=total)
-    return SessaoRetomada(
-        blocos=RETOMADA_BLOCOS,
-        caminhada_seg=RETOMADA_BLOCO_SEG - trote_por_bloco,
-        trote_seg=trote_por_bloco,
-    )
-
-
-class Retomada(BaseModel):
-    """Estágio da semana em retomada -- igual pra todas as sessões, seja
-    quantas forem."""
-    trote_bloco: int  # trote por bloco do estágio; 0 = só caminhada (voltou do 1º estágio)
-    decisao: str  # por que o estágio subiu, repetiu ou voltou
-    pace_trote: tuple[float, float] | None = None  # ver _referencias_trote
-    fc_teto: int | None = None
-
-    def sessao(self) -> SessaoRetomada:
-        return _montar_sessao(self.trote_bloco).model_copy(update={"pace_trote": self.pace_trote, "fc_teto": self.fc_teto})
-
-
-def _referencias_trote(con: psycopg.Connection, hoje: date) -> tuple[tuple[float, float] | None, int | None]:
-    """(faixa de pace do trote, teto de FC) a partir do histórico real --
-    ver JANELA_REFERENCIA_TROTE_DIAS. None no que não houver dado."""
-    _, linhas = _consultar(
-        con,
-        "SELECT SUM(s.duracao_seg) / 60 / NULLIF(SUM(s.distancia_m) / 1000, 0) "
-        "FROM stg_atividade_splits s JOIN vw_sessoes v USING (activity_id) "
-        "WHERE s.tipo = 'RWD_RUN' AND v.tipo_treino = 'Rodagem/Recuperação' AND v.data >= %s "
-        "GROUP BY s.activity_id HAVING SUM(s.duracao_seg) >= %s",
-        (hoje - timedelta(days=JANELA_REFERENCIA_TROTE_DIAS), TROTE_MIN_SEG_REFERENCIA),
-    )
-    paces = sorted(float(l[0]) for l in linhas if l[0] is not None)
-    pace = None
-    if paces:
-        mediana = paces[len(paces) // 2]
-        rapido = int(mediana * 4) / 4  # arredonda pra baixo em 15s
-        pace = (rapido, rapido + FOLGA_PACE_TROTE_MIN)
-    _, linhas = _consultar(con, "SELECT MAX(fc_maxima) FROM vw_sessoes WHERE data >= %s", (hoje - timedelta(days=365),))
-    fc_max = linhas[0][0] if linhas else None
-    return pace, (round(float(fc_max) * FC_TETO_FRACAO_MAX) if fc_max else None)
-
-
-def _sessoes_antes_de(con: psycopg.Connection, inicio_semana: date) -> list[tuple]:
-    """(data, tipo_treino, segundos de trote, km_corridos, dor) das sessões
-    dos JANELA_SESSAO_DIAS dias antes da semana a planejar. Sem splits de
-    run/walk, conta a duração inteira como trote (lado conservador)."""
-    _, linhas = _consultar(
-        con,
-        "SELECT data, tipo_treino, COALESCE(segundos_correndo, duracao_min * 60), km_corridos, dor "
-        "FROM vw_sessoes WHERE data >= %s AND data < %s ORDER BY data",
-        (inicio_semana - timedelta(days=JANELA_SESSAO_DIAS), inicio_semana),
-    )
-    return linhas
-
-
-def _indice_estagio(trote_bloco: float) -> int:
-    """Índice do maior estágio com trote <= trote_bloco (-1 se abaixo do 1º)."""
-    return max((i for i, e in enumerate(RETOMADA_ESTAGIOS_SEG) if e <= trote_bloco), default=-1)
-
-
-def _trote_prescrito(spreadsheet: gspread.Spreadsheet, inicio_semana: date) -> int | None:
-    """Trote por bloco prescrito na semana anterior, lido do motivo gravado
-    na aba "Plano da Semana" ("3x (caminhe 9:00 + trote 1:00) ..." ou "30
-    min de trote contínuo"). None se a semana anterior não teve sessão de
-    retomada no plano."""
-    datas = {str(inicio_semana - timedelta(days=i)) for i in range(1, 8)}
-    aba = obter_aba(spreadsheet, ABA_PLANO, CABECALHO_PLANO, cor=COR_PLANO)
-    idx_data, idx_motivo = CABECALHO_PLANO.index("data"), CABECALHO_PLANO.index("motivo")
-    prescritos = []
-    for linha in aba.get_all_values()[1:]:
-        if len(linha) <= idx_motivo or linha[idx_data] not in datas:
-            continue
-        motivo = linha[idx_motivo]
-        if casou := re.match(r"\d+x \(caminhe \d+:\d{2} \+ trote (\d+):(\d{2})\)", motivo):
-            prescritos.append(int(casou.group(1)) * 60 + int(casou.group(2)))
-        elif re.match(r"\d+ min de trote contínuo", motivo):
-            prescritos.append(RETOMADA_BLOCO_SEG)
-    return max(prescritos) if prescritos else None
-
-
-def _estado_retomada(sessoes: list[tuple], inicio_semana: date, prescrito: int | None) -> Retomada | None:
-    """None se o corredor já não está em retomada (fez sessão de ~30 min de
-    trote nos últimos 30 dias). Senão, o estágio da semana a planejar, a
-    partir do estágio prescrito na semana anterior (`prescrito`, ver
-    _trote_prescrito) -- não do trote detectado, que só confirma se ele foi
-    cumprido (trotar além do prescrito não pula estágio):
-      - qualquer dor registrada (>= 1) -> volta um estágio (regra do protocolo);
-      - nenhuma sessão com trote -> repete o estágio (1º, se não havia);
-      - estágio cumprido e todas as sessões com trote com dor 0 registrada -> sobe um;
-      - senão (sessão sem dor registrada, ou trote abaixo do prescrito) -> repete.
-    Sem plano anterior lido (`prescrito` None), usa o maior estágio que o
-    trote detectado cumpre. Caminhada (tipo_treino) fica fora da conta de
-    trote: o pouco de "trote" que o Garmin detecta nela não é sessão."""
-    if any(float(s[2] or 0) >= RETOMADA_FIM_TROTE_SEG for s in sessoes):
-        return None
-
-    semana = [s for s in sessoes if s[0] >= inicio_semana - timedelta(days=7)]
-    com_trote = [s for s in semana if s[1] != "Caminhada"]
-    maior_bloco = max((float(s[2] or 0) for s in com_trote), default=0.0) / RETOMADA_BLOCOS
-    dores = [int(s[4]) for s in semana if s[4] is not None]
-
-    if prescrito is not None:
-        atual = _indice_estagio(prescrito)
-        cumprido = maior_bloco >= RETOMADA_CUMPRIDO_FRACAO * prescrito
-    else:
-        atual = _indice_estagio(maior_bloco / RETOMADA_CUMPRIDO_FRACAO)
-        cumprido = atual >= 0
-    estagio = lambda i: RETOMADA_ESTAGIOS_SEG[min(max(i, 0), len(RETOMADA_ESTAGIOS_SEG) - 1)]
-    txt = lambda seg: "30 min contínuos" if seg >= RETOMADA_BLOCO_SEG else f"trote {_mmss(seg)} por bloco"
-
-    if dores and max(dores) >= LIMIAR_DOR_RETOMADA:
-        trote = estagio(atual - 1) if atual >= 1 else 0
-        return Retomada(trote_bloco=trote, decisao=f"dor {max(dores)} registrada na semana anterior: o protocolo volta um estágio")
-    if not com_trote:
-        return Retomada(
-            trote_bloco=estagio(atual),
-            decisao="nenhuma sessão com trote na semana anterior: repete o estágio (o 1º, se ainda não havia)",
-        )
-    if cumprido and all(s[4] is not None for s in com_trote) and atual + 1 < len(RETOMADA_ESTAGIOS_SEG):
-        return Retomada(
-            trote_bloco=estagio(atual + 1),
-            decisao=f"estágio anterior ({txt(estagio(atual))}) cumprido sem dor: sobe um estágio",
-        )
-    motivo = "trote abaixo do prescrito" if not cumprido else "alguma sessão com trote sem dor registrada (só sobe com dor 0 registrada em todas)"
-    return Retomada(trote_bloco=estagio(atual), decisao=f"{motivo}: repete o estágio")
-
-
-def _max_sessoes(dias_livres: int) -> int:
-    """Máximo de sessões que cabem em `dias_livres` dias seguidos sem duas
-    em dias seguidos (regra de alternância): 7 dias -> 4."""
-    return (dias_livres + 1) // 2
-
-
-def _instrucao_retomada(r: Retomada, max_sessoes: int) -> str:
-    s = r.sessao()
-    referencias = ", ".join(
-        t for t in (s.texto_pace() and f"pace {s.texto_pace()}", s.texto_fc() and f"FC {s.texto_fc()}") if t
-    ) or "sem histórico de trote suficiente"
-    return (
-        f"INSTRUÇÃO OBRIGATÓRIA (retomada pós-canelite -- protocolo de Warden et al., um "
-        f"estágio por semana): o corredor ainda não sustenta 30 min de trote. Quantas sessões "
-        f"fazer nesta semana é decisão sua, com base nos dados (de 1 a {max_sessoes}, em dias "
-        f"alternados, nunca seguidos). Todas as sessões da semana são iguais: {s.descricao()} "
-        f"({s.duracao_min:.0f} min). Estágio desta semana: {r.decisao}. Cada sessão é "
-        f"Rodagem/Recuperação com duracao_min {s.duracao_min:.0f} e distancia_km nulo; "
-        f"pace_alvo e fc_alvo são preenchidos depois, a partir do histórico dele ({referencias}). "
-        f"O trote é bem leve, conversável. Nenhum outro tipo de treino (nem "
-        f"Longão, nem intensidade). Explique no motivo que, se doer durante, depois ou no dia "
-        f"seguinte, ele para, registra a dor e faz as sessões seguintes da semana só "
-        f"caminhando. O ACWR da tabela não se aplica durante a retomada -- o controle de "
-        f"carga é este protocolo."
-    )
-
-
-def _teto_sessao_km(sessoes: list[tuple]) -> float | None:
-    maior = max((float(s[3]) for s in sessoes if s[3] is not None), default=0.0)
-    return round(maior * (1 + AUMENTO_SESSAO_MAX), 2) if maior > 0 else None
-
-
-def _instrucao_teto_sessao(teto_km: float | None) -> str:
-    if teto_km is None:
-        return ""
-    return (
-        f"INSTRUÇÃO OBRIGATÓRIA (carga por sessão): nenhuma sessão da semana pode passar de "
-        f"{teto_km:.2f} km -- 10% acima da sessão mais longa dos últimos {JANELA_SESSAO_DIAS} "
-        f"dias. Frandsen et al. (BJSM, 2025), com 5.205 corredores, mostraram que uma sessão "
-        f"acima disso aumenta a taxa de lesão por sobrecarga, mesmo com a semana dentro do "
-        f"normal. Use distancia_km em todo treino, pra o limite poder ser conferido."
-    )
-
-
-def _violacoes_regras(
-    plano: "PlanoSemanal",
-    dias: list[date],
-    retomada: Retomada | None,
-    teto_km: float | None,
-    dias_bloqueados: list[date],
-) -> list[str]:
-    """Regras determinísticas conferidas no plano devolvido pelo LLM -- não
-    dependem da revisão de coerência (outra chamada ao LLM) pegar.
-    `dias_bloqueados`: dias passados + dia seguinte a uma corrida real (a
-    alternância vale também na virada da semana)."""
-    problemas = []
-    corridas = [i for i, d in enumerate(plano.dias) if not d.descanso]
-    for a, b in zip(corridas, corridas[1:]):
-        if b == a + 1:
-            problemas.append(f"{DIAS_SEMANA_PT[a]} e {DIAS_SEMANA_PT[b]}: sessões em dias seguidos")
-    for i in corridas:
-        if dias[i] in dias_bloqueados:
-            problemas.append(f"{DIAS_SEMANA_PT[i]} ({dias[i]}): dia que tinha que ser descanso")
-    if retomada:
-        if not corridas:
-            problemas.append("nenhuma sessão na semana")
-        for i in corridas:
-            if not (plano.dias[i].tipo_treino or "").lower().startswith("rodagem"):
-                problemas.append(f"{DIAS_SEMANA_PT[i]}: {plano.dias[i].tipo_treino} durante a retomada (só Rodagem/Recuperação)")
-    elif teto_km is not None:
-        for i in corridas:
-            km = plano.dias[i].distancia_km
-            if km is None:
-                problemas.append(f"{DIAS_SEMANA_PT[i]}: sem distancia_km, o teto por sessão não pode ser conferido")
-            elif km > teto_km:
-                problemas.append(f"{DIAS_SEMANA_PT[i]}: {km} km, acima do teto por sessão de {teto_km} km")
-    return problemas
-
-
-def _aplicar_retomada(plano: "PlanoSemanal", r: Retomada) -> SessaoRetomada:
-    """Fixa em Python a estrutura de cada sessão (o LLM escolhe quantas e
-    em que dias, e escreve o motivo, não os números) -- vai igual pra
-    planilha, e-mail e relógio."""
-    sessao = r.sessao()
-    for dia in plano.dias:
-        if dia.descanso:
-            continue
-        dia.tipo_treino = "Rodagem/Recuperação"
-        dia.distancia_km = None
-        dia.duracao_min = sessao.duracao_min
-        dia.pace_alvo = sessao.texto_pace()
-        dia.fc_alvo = sessao.texto_fc()
-        guia = ", ".join(t for t in (dia.pace_alvo, dia.fc_alvo and f"FC {dia.fc_alvo}") if t)
-        dia.motivo = f"{sessao.descricao()}{f' ({guia})' if guia else ''} -- {dia.motivo}"
-    return sessao
-
-
-def _instrucao_guardrail_acwr(acwr: float | None) -> str:
-    """Só dispara pra ACWR alto -- a pesquisa (seção 6.1 do case) documenta
-    risco de lesão especificamente acima da zona segura. ACWR abaixo de 0.8
-    é destreino, não risco de sobrecarga; não é caso de guardrail."""
-    if acwr is None or acwr <= ZONA_SEGURA_MAX:
-        return ""
-    if acwr > ZONA_ALERTA_REFORCADO:
-        return (
-            f"ALERTA OBRIGATÓRIO (carga semanal): o ACWR desta semana é {acwr:.2f}, acima do "
-            f"limiar de risco alto (1.5) -- pesquisa (Gabbett, 2016) mostra 2-4x mais chance de "
-            f"lesão na semana seguinte nessa faixa. Comece a resposta com um alerta explícito de "
-            f"risco de sobrecarga e recomende redução de volume/intensidade nesta semana, "
-            f"priorizando recuperação em vez de qualquer aumento de carga."
-        )
-    return (
-        f"ALERTA OBRIGATÓRIO (carga semanal): o ACWR desta semana é {acwr:.2f}, fora da zona "
-        f"segura (0.8-1.3). Mencione isso explicitamente na resposta antes de sugerir qualquer "
-        f"aumento de volume ou intensidade."
-    )
-
-
-LIMIAR_DOR_GUARDRAIL = 2
-
-
-def _dor_mais_recente(colunas: list[str], linhas: list[tuple]) -> int | None:
-    """Dor da atividade mais recente com dor registrada -- linhas já vêm em
-    ordem cronológica ASC (ORDER BY data), percorre do fim pro início e
-    pula quem ainda não tem dor preenchida (None != "sem dor")."""
-    idx_dor = colunas.index("dor")
-    for linha in reversed(linhas):
-        if linha[idx_dor] is not None:
-            return int(linha[idx_dor])
-    return None
-
-
-def _instrucao_guardrail_dor(dor: int | None) -> str:
-    """Progressão de intensidade sessão a sessão, não só carga agregada da
-    semana (isso já é o ACWR) -- protocolo de retomada pós-MTSS/canelite:
-    só avança intensidade depois de sessões consecutivas sem dor; se a dor
-    voltar, regride. Determinístico igual o guardrail de ACWR -- não é uma
-    sugestão que o LLM pode ignorar."""
-    if dor is None or dor < LIMIAR_DOR_GUARDRAIL:
-        return ""
-    return (
-        f"ALERTA OBRIGATÓRIO (dor recente): a dor mais recente registrada foi nível {dor} "
-        f"(escala 0-5). Protocolo de retomada pós-canelite: intensidade só avança depois de "
-        f"sessões consecutivas sem dor. Como {dor} >= {LIMIAR_DOR_GUARDRAIL}, esta semana só "
-        f"pode conter treinos de Rodagem/Recuperação ou Longão -- nenhum Ritmo, Limiar, "
-        f"Intervalado, Tiro ou Fartlek, mesmo que o ACWR permita."
-    )
-
-
-REGRAS_COMPOSICAO_SEMANA = (
-    "- Distribuição polarizada (Seiler & Kjerland, 2006 -- padrão observado em atletas de "
-    "endurance de elite): no máximo 1 treino de intensidade (Ritmo, Limiar, Intervalado ou "
-    "Tiro) por semana. Todos os outros dias de corrida têm que ser Rodagem/Recuperação ou "
-    "Longão. Isso é regra fixa, não sugestão -- não decida o número de treinos fortes "
-    "livremente a cada vez.\n"
-    "- Alternância hard/easy: nunca dois dias de corrida seguidos sem pelo menos 1 dia de "
-    "descanso entre eles."
-)
-
-
-def _construir_prompt(
-    atividades_txt: str,
-    resumo_txt: str,
-    faixas_txt: str,
-    observacoes_txt: str,
-    instrucoes_guardrail: list[str],
-    dias: list[date],
-    dias_bloqueados: list[date],
-) -> str:
-    dias_txt = ", ".join(f"{nome} {d.strftime('%d/%m')}" for nome, d in zip(DIAS_SEMANA_PT, dias))
-    partes = [
-        "Você é o treinador de um corredor recreacional em retomada gradual após um "
-        "episódio de canelite (síndrome do estresse tibial medial). Analise os dados "
-        "objetivos de treino (relógio Garmin) abaixo e monte o plano da semana de "
-        "treino, como um treinador de verdade faria -- não uma sugestão genérica.",
-        "",
-        f"A semana a planejar é: {dias_txt}.",
-        "",
-        "Objetivo: um plano que marque evolução -- sem repetir o padrão de sobrecarga "
-        "que já causou lesão antes. Evolução é o objetivo; não-sobrecarga é uma "
-        "restrição sobre esse objetivo, não um objetivo paralelo.",
-        "",
-        "Use exclusivamente os tipos de treino abaixo (nomenclatura + intensidade "
-        "fisiológica de referência) -- não invente categoria fora dessa lista. O "
-        "%VO2max é só pra você entender a relação de esforço ENTRE os tipos -- o "
-        "corredor não consegue medir VO2max correndo, então NUNCA comunique a "
-        "intensidade em %VO2max pra ele:",
-        TIPOS_DE_TREINO,
-        "",
-        "Regras obrigatórias de composição da semana (baseadas em evidência, não "
-        "opcionais -- servem justamente pra você não variar a estrutura da semana de "
-        "forma arbitrária a cada geração):",
-        REGRAS_COMPOSICAO_SEMANA,
-        "",
-        "Pace e FC que o próprio corredor já demonstrou pra cada tipo de treino nas "
-        "últimas semanas (dado real dele, não tabela genérica) -- use isso pra dar o "
-        "alvo de cada treino em pace (min/km) e FC (bpm), que são os dois números que "
-        "ele vê ao vivo no relógio durante a corrida:",
-        faixas_txt,
-        "",
-        f"Atividades dos últimos {JANELA_SEMANAS} semanas (uma linha por atividade):",
-        atividades_txt,
-        "",
-        "Resumo semanal (ACWR = Acute:Chronic Workload Ratio, zona segura 0.8-1.3, risco "
-        "alto acima de 1.5). A carga (km_corridos, variação %, carga_cronica_km e ACWR) é "
-        "medida em km efetivamente corridos -- a distância ponderada pelo tempo correndo vs. "
-        "caminhando; km_total inclui caminhada e é só informativo. Semana sem atividade "
-        "aparece com 0:",
-        resumo_txt,
-        "",
-        "Observações do próprio corredor sobre as semanas recentes (texto livre, "
-        "escrito por ele -- pode conter contexto que os números não capturam, tipo "
-        "cansaço, viagem, mudança de rotina):",
-        observacoes_txt,
-    ]
-    for instrucao in instrucoes_guardrail:
-        partes += ["", instrucao]
-    if dias_bloqueados:
-        bloqueados_txt = ", ".join(
-            f"{DIAS_SEMANA_PT[dias.index(d)]} {d.strftime('%d/%m')}" for d in dias_bloqueados
-        )
-        partes += [
-            "",
-            f"Dias que obrigatoriamente são descanso (`descanso: true`): {bloqueados_txt} -- "
-            "ou já passaram, ou vêm logo depois de um dia em que o corredor correu (a regra "
-            "de alternância vale também na virada da semana).",
-        ]
-    partes += [
-        "",
-        "Quantos dias de treino a semana tem é decisão sua, com base nos dados -- não há "
-        "número fixo, só as regras acima (a alternância permite no máximo 4 dias de corrida "
-        "em 7).",
-        "",
-        "Responda em português. Monte o plano dia a dia da semana, "
-        "**exatamente 7 dias, na ordem Domingo a Sábado, incluindo os dias de "
-        "descanso** (um item por dia, `descanso: true` e o resto dos campos nulos "
-        "nesse caso). Pra cada treino: tipo (da lista acima), distância ou duração "
-        "alvo, **pace alvo em min/km e FC alvo em bpm** (nunca %VO2max), e uma frase "
-        "curta do porquê desse treino nesse momento, com base nos dados. Pra tipo de "
-        "treino sem histórico do corredor ainda, pode sugerir mesmo sem estar no plano "
-        "da semana -- coloque em `estimativas_futuras`, estimando pace/FC a partir do "
-        "que ele já demonstrou nos tipos mais próximos (ex. Limiar é mais rápido que "
-        "Ritmo), nunca dentro do plano da semana em si. Em `prazo_estimado`, seja "
-        "específico e explicativo sobre QUANDO -- não \"no futuro\" ou \"quando estiver "
-        "pronto\": diga um critério concreto (ex. \"depois de 2 semanas seguidas de "
-        "Limiar sem dor\") ou uma janela de tempo estimada (ex. \"provavelmente em "
-        "3-4 semanas, no ritmo de evolução atual\"), baseado no protocolo de retomada "
-        "pós-canelite (progressão só após sessões consecutivas sem dor) e no "
-        "histórico real de progressão do corredor. Feche com uma frase em "
-        "`logica_geral` resumindo a lógica geral da semana.",
-    ]
-    return "\n".join(partes)
-
-
-def _modelos() -> list[str]:
-    """Modelo principal (GEMINI_MODEL, ou MODELO_PADRAO) e depois os de
-    reserva, sem repetir."""
-    load_dotenv(ROOT / ".env")
-    principal = os.environ.get("GEMINI_MODEL") or MODELO_PADRAO
-    return [principal] + [m for m in MODELOS_RESERVA if m != principal]
-
-
-def _verificar_teto_tokens(cliente: genai.Client, modelo: str, texto: str) -> None:
-    """Fase 10 -- rede de segurança, não limite operacional: a janela de 4
-    semanas já mantém o prompt bem abaixo disso; um teto bem abaixo do
-    limite real do Gemini (até 1M) pega algo que fugiu do esperado (bug de
-    janela, observação colada por engano) antes de gastar uma chamada de
-    geração/revisão em cima de um prompt fora do normal."""
-    contagem = cliente.models.count_tokens(model=modelo, contents=texto)
-    if contagem.total_tokens > TETO_TOKENS:
-        raise RuntimeError(
-            f"Prompt com {contagem.total_tokens} tokens, acima do teto de {TETO_TOKENS} -- "
-            "algo fugiu do esperado (não é limite normal de operação). Abortando."
-        )
-
-
-def _gerar_json(conteudo: str, schema: type[BaseModel], o_que: str) -> str:
-    """Chamada ao Gemini com saída estruturada (`response_schema`), passando
-    pro próximo modelo de `_modelos()` quando o atual está sobrecarregado
-    (CODIGOS_SOBRECARGA, depois das tentativas do próprio SDK). Bloqueio ou
-    resposta incompleta não troca de modelo: é problema do prompt, não de
-    capacidade."""
-    cliente = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-    ultimo_erro: errors.APIError | None = None
-    for modelo in _modelos():
-        try:
-            _verificar_teto_tokens(cliente, modelo, conteudo)
-            resposta = cliente.models.generate_content(
-                model=modelo,
-                contents=conteudo,
-                config=types.GenerateContentConfig(
-                    # não usamos tools/function calling -- desliga o AFC padrão pra
-                    # não gerar o aviso "Direct use of AFC..." a cada chamada, sem
-                    # efeito nenhum no resultado.
-                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-                    response_mime_type="application/json",
-                    response_schema=schema,
-                ),
-            )
-        except errors.APIError as erro:
-            if erro.code not in CODIGOS_SOBRECARGA:
-                raise
-            print(f"[Gemini: {modelo} indisponível ({erro.code}) para {o_que}, tentando o próximo modelo]")
-            ultimo_erro = erro
-            continue
-        if not resposta.candidates:
-            motivo = resposta.prompt_feedback.block_reason if resposta.prompt_feedback else "desconhecido"
-            raise RuntimeError(f"Gemini bloqueou o prompt de {o_que} (motivo: {motivo}).")
-        finalizacao = resposta.candidates[0].finish_reason
-        if finalizacao not in (types.FinishReason.STOP, None) or not resposta.text:
-            raise RuntimeError(f"Gemini não completou {o_que} (finish_reason={finalizacao}).")
-        print(f"[{o_que}: {modelo}]")
-        return resposta.text
-    raise ultimo_erro
-
-
-def gerar_analise(prompt: str) -> str:
-    """Chamada ao LLM isolada nesta função -- ver docstring do módulo.
-
-    Devolve texto (contrato genérico, ver seção 4 do case) -- só que aqui
-    esse texto é um JSON validado contra PlanoSemanal (response_schema),
-    não texto livre. `response_schema` e a troca de modelo por sobrecarga
-    são específicos do Gemini; ficam contidos em `_gerar_json`, então trocar
-    de provedor continua sendo só reescrever essas duas funções.
-    """
-    return _gerar_json(prompt, PlanoSemanal, "geração do plano")
-
-
-def _construir_prompt_revisao(prompt_original: str, plano_texto: str) -> str:
-    return "\n".join([
-        "Você é um revisor cético, independente de quem gerou o plano abaixo -- sua única "
-        "função é encontrar problemas, não elogiar o trabalho. Considere o contexto e as "
-        "instruções originais que levaram a esse plano:",
-        "",
-        prompt_original,
-        "",
-        "=" * 40,
-        "PLANO GERADO A PARTIR DESSE CONTEXTO:",
-        "=" * 40,
-        plano_texto,
-        "",
-        "Avalie o plano contra três critérios -- qualquer um deles, sozinho, reprova o "
-        "plano:",
-        "1. Inconsistência interna: o `motivo` de algum dia contradiz o tipo de treino, "
-        "distância, duração, pace ou FC escolhidos pra aquele dia.",
-        "2. Contradição com os dados de entrada: o plano ignora um sinal óbvio dos dados "
-        "(atividades, resumo semanal, observações do corredor) sem justificativa no motivo.",
-        "3. Violação de guardrail: se havia alguma instrução obrigatória de guardrail no "
-        "contexto acima (ACWR fora da zona segura, ou dor recente exigindo restrição de "
-        "intensidade), confira se o plano realmente a respeitou -- inclusive de forma "
-        "disfarçada (ex. um treino rotulado como Rodagem/Recuperação mas com distância, "
-        "duração, pace ou FC incompatíveis com baixa intensidade).",
-        "",
-        "Responda `coerente: true` só se o plano passar nos três critérios. Se reprovar, "
-        "`coerente: false` e liste em `problemas` cada item específico encontrado (não "
-        "genérico -- diga qual dia, qual campo, qual contradição), e em `motivo` um resumo "
-        "de uma frase.",
-    ])
-
-
-def revisar_coerencia(prompt_original: str, plano_texto: str) -> RevisaoCoerencia:
-    """Fase 11 -- segunda chamada ao Gemini, independente da que gerou o
-    plano (não autoavaliação na mesma resposta, ver CASE_DO_PROJETO_1.md
-    seção 11) -- avalia coerência interna, contradição com os dados de
-    entrada e violação de guardrail que tenha escapado da restrição de
-    vocabulário. Recebe o prompt original (que já contém os dados e as
-    instruções de guardrail que dispararam, se algum) + o plano gerado."""
-    prompt_revisao = _construir_prompt_revisao(prompt_original, plano_texto)
-    return RevisaoCoerencia.model_validate_json(_gerar_json(prompt_revisao, RevisaoCoerencia, "revisão de coerência"))
-
-
-def _plano_semanal(texto_json: str) -> PlanoSemanal:
-    """Parse + validação do JSON devolvido por gerar_analise -- separado da
-    chamada em si, pra ficar provider-agnostic (qualquer LLM que devolva
-    esse formato funciona aqui, não só Gemini)."""
-    plano = PlanoSemanal.model_validate_json(texto_json)
-    if len(plano.dias) != 7:
-        raise ValueError(f"Esperava 7 dias no plano, veio {len(plano.dias)}.")
-    return plano
-
-
-ABA_PLANO = "Plano da Semana"
-COR_PLANO = (0.55, 0.32, 0.78)  # roxo
-CABECALHO_PLANO = [
-    "dia_semana", "data", "tipo_treino", "distancia_km", "duracao_min",
-    "pace_alvo", "fc_alvo", "motivo",
-]
-
-
-def _linhas_plano(plano: PlanoSemanal, dias: list[date]) -> list[tuple]:
-    # dia_semana vem de DIAS_SEMANA_PT (índice), não de treino.dia_semana --
-    # esse campo é preenchido livremente pelo LLM e saiu inconsistente
-    # ("sábado" minúsculo em vez de "Sábado"); nome do dia é dado
-    # determinístico, não precisa confiar na IA pra isso.
-    #
-    # Só linhas de dia (1 dia = 1 linha, 7 por semana) -- estimativas_futuras
-    # e logica_geral não têm dia específico e "não se encaixam" numa tabela
-    # de histórico por dia; vão só pro e-mail (ver enviar_email_resumo).
-    return [
-        (
-            nome_dia,
-            str(data),
-            "Descanso" if treino.descanso else treino.tipo_treino,
-            treino.distancia_km,
-            treino.duracao_min,
-            treino.pace_alvo,
-            treino.fc_alvo,
-            treino.motivo,
-        )
-        for nome_dia, treino, data in zip(DIAS_SEMANA_PT, plano.dias, dias)
-    ]
-
-
-def plano_ja_escrito(spreadsheet, dias: list[date]) -> bool:
-    """A semana já tem plano na aba "Plano da Semana"? Critério: os 7 dias
-    dela estão na coluna `data` (o plano sempre escreve os 7 dias, inclusive
-    descanso, num append só). Os 7, não só o primeiro: na troca da semana
-    de segunda-domingo pra domingo-sábado (2026-10), o domingo 11/10 já
-    estava no plano antigo e a semana nova seria tomada como escrita."""
-    aba = obter_aba(spreadsheet, ABA_PLANO, CABECALHO_PLANO, cor=COR_PLANO)
-    idx_data = CABECALHO_PLANO.index("data") + 1  # col_values é 1-based
-    return {str(d) for d in dias} <= set(aba.col_values(idx_data)[1:])
-
-
-def escrever_plano(spreadsheet, plano: PlanoSemanal, dias: list[date]) -> int:
-    """Append-only: cada semana é um registro histórico, não um estado
-    atual pra espelhar -- diferente de planilha_desempenho.py (dashboard),
-    aqui NÃO se usa sobrescrever(). Idempotente: se a semana já tem plano
-    (ver plano_ja_escrito), não insere de novo."""
-    if plano_ja_escrito(spreadsheet, dias):
-        return 0
-    aba = obter_aba(spreadsheet, ABA_PLANO, CABECALHO_PLANO, cor=COR_PLANO)
-    linhas = _linhas_plano(plano, dias)
-    inserir_linhas(aba, [["" if v is None else v for v in linha] for linha in linhas])
-    return len(linhas)
-
-
-def _numero_planilha(v, casas: int) -> str:
-    """Mesma convenção de vírgula decimal de planilha_desempenho._numero --
-    sem isso, o Sheets confunde "4.57" com separador de milhar (locale
-    pt-BR da planilha) e vira "4.570.000..." (ver histórico do projeto)."""
-    if v is None:
-        return ""
-    return f"{float(v):.{casas}f}".rstrip("0").rstrip(".").replace(".", ",")
-
-
-def apagar_plano_da_semana(spreadsheet, dias: list[date]) -> tuple[int, int]:
-    """Regeração forçada -- apaga o plano antigo da semana: as linhas da aba
-    "Plano da Semana" e as linhas PLANEJADO de "Atividades". Linhas já
-    resolvidas (REALIZADO_*/NÃO_REALIZADO) e atividades reais não são
-    tocadas: são histórico, não plano. Só deve rodar DEPOIS de o plano novo
-    ser aprovado -- se a geração falhar, o plano atual continua intacto.
-    Devolve (linhas apagadas do plano, linhas PLANEJADO apagadas)."""
-    datas_semana = {str(d) for d in dias}
-
-    aba_plano = obter_aba(spreadsheet, ABA_PLANO, CABECALHO_PLANO, cor=COR_PLANO)
-    idx_data_plano = CABECALHO_PLANO.index("data")
-    linhas_plano = [
-        i + 1
-        for i, linha in enumerate(aba_plano.get_all_values())
-        if i > 0 and len(linha) > idx_data_plano and linha[idx_data_plano] in datas_semana
-    ]
-
-    aba_ativ = obter_aba(spreadsheet, ABA_ATIVIDADES, CABECALHO_ATIVIDADES, cor=COR_ATIVIDADES)
-    idx_data = CABECALHO_ATIVIDADES.index("data")
-    idx_status = CABECALHO_ATIVIDADES.index("status")
-    linhas_ativ = [
-        i + 1
-        for i, linha in enumerate(aba_ativ.get_all_values())
-        if i > 0 and len(linha) > idx_status and linha[idx_data] in datas_semana and linha[idx_status] == STATUS_PLANEJADO
-    ]
-
-    # de baixo pra cima, senão o índice das linhas seguintes muda a cada delete
-    for r in sorted(linhas_plano, reverse=True):
-        aba_plano.delete_rows(r)
-    for r in sorted(linhas_ativ, reverse=True):
-        aba_ativ.delete_rows(r)
-    return len(linhas_plano), len(linhas_ativ)
-
-
-def escrever_dias_planejados(spreadsheet, plano: PlanoSemanal, dias: list[date], forcar: bool = False) -> int:
-    """Fase 9 -- grava um placeholder (status PLANEJADO) por dia de treino
-    (não descanso) na aba "Atividades", pro job diário resolver depois
-    contra a atividade real (ver planilha_desempenho.resolver_dias_planejados).
-    Upsert por `data`, não por `activity_id` (dia planejado não tem
-    atividade associada ainda) -- idempotente: se qualquer dia dessa semana
-    já tem linha de plano em "Atividades", não insere de novo. Checa
-    qualquer dia da semana, não só o domingo -- domingo pode ser dia de
-    descanso, que nunca ganha
-    linha própria, então checar só ela nunca encontraria a semana já
-    escrita e duplicaria a cada execução.
-
-    `forcar=True` (regeração forçada, ver apagar_plano_da_semana): não trata
-    linha com status como "semana já escrita" -- só sobraram as já resolvidas
-    (as PLANEJADO foram apagadas), e essas datas já têm desfecho, então não
-    ganham placeholder novo; as demais ganham."""
-    aba = obter_aba(spreadsheet, ABA_ATIVIDADES, CABECALHO_ATIVIDADES, cor=COR_ATIVIDADES)
-    idx_data = CABECALHO_ATIVIDADES.index("data")
-    idx_status = CABECALHO_ATIVIDADES.index("status")
-    datas_semana = {str(d) for d in dias}
-    datas_com_status = {
-        linha[idx_data]
-        for linha in aba.get_all_values()[1:]
-        if len(linha) > idx_status and linha[idx_data] in datas_semana and linha[idx_status]
-    }
-    if datas_com_status and not forcar:
-        return 0
-
-    em_branco_real = [""] * len(COLUNAS_REAIS)
-    idx_data_real = COLUNAS_REAIS.index("data")
-    linhas = []
-    # mais recente primeiro (mesma convenção do resto da aba, ver
-    # escrever_atividades) -- dias já vem em ordem Domingo->Sábado, então
-    # percorre de trás pra frente antes de inserir no topo.
-    for treino, data in reversed(list(zip(plano.dias, dias))):
-        if treino.descanso or str(data) in datas_com_status:
-            continue
-        linha_real = list(em_branco_real)
-        linha_real[idx_data_real] = str(data)
-        linha_plano = [
-            STATUS_PLANEJADO,
-            treino.tipo_treino or "",
-            _numero_planilha(treino.distancia_km, casas=2),
-            _numero_planilha(treino.duracao_min, casas=1),
-            treino.pace_alvo or "",
-            treino.fc_alvo or "",
-        ]
-        linhas.append([str(v) for v in linha_real + linha_plano])
-    inserir_linhas_no_topo(aba, linhas)
-    return len(linhas)
-
-
-def _texto_plano(plano: PlanoSemanal, dias: list[date]) -> str:
-    """Plano completo em texto -- dia a dia + estimativas futuras + lógica
-    geral. Compartilhado entre o print do terminal e o corpo do e-mail
-    (enviar_email_resumo), pra não duplicar a formatação em dois lugares."""
-    linhas = []
-    for nome_dia, treino, data in zip(DIAS_SEMANA_PT, plano.dias, dias):
-        if treino.descanso:
-            linhas.append(f"{nome_dia} ({data}): Descanso -- {treino.motivo}")
-            continue
-        partes = [f"{treino.distancia_km}km" if treino.distancia_km else f"{treino.duracao_min:g}min"]
-        if treino.pace_alvo:
-            partes.append(f"pace {treino.pace_alvo}")
-        if treino.fc_alvo:
-            partes.append(f"FC {treino.fc_alvo}")
-        linhas.append(f"{nome_dia} ({data}): {treino.tipo_treino} -- {', '.join(partes)} -- {treino.motivo}")
-    if plano.estimativas_futuras:
-        linhas.append("")
-        linhas.append("Estimativas pra tipos ainda não tentados:")
-        for est in plano.estimativas_futuras:
-            linhas.append(f"  {est.tipo_treino}: pace {est.pace_alvo}, FC {est.fc_alvo}")
-            linhas.append(f"    Prazo estimado: {est.prazo_estimado}")
-            linhas.append(f"    {est.nota}")
-    linhas.append("")
-    linhas.append(f"Lógica da semana: {plano.logica_geral}")
-    return "\n".join(linhas)
-
-
-def _imprimir_plano(plano: PlanoSemanal, dias: list[date]) -> None:
+def _relatar(resumo: str, detalhe: str, itens: list[str]) -> None:
+    """No GitHub Actions só o resumo (o log é público, ver EM_CI); rodando
+    local, o detalhe e cada item."""
     if EM_CI:
-        treinos = sum(1 for d in plano.dias if not d.descanso)
-        print(
-            f"[plano da semana de {dias[0]} gerado: {treinos} treino(s), {7 - treinos} descanso(s) "
-            "-- conteúdo completo no e-mail, na planilha e no relógio]"
-        )
+        print(resumo)
         return
-    print(_texto_plano(plano, dias))
+    print(detalhe)
+    for item in itens:
+        print(f"  - {item}")
 
 
-def enviar_email_resumo(plano: PlanoSemanal, dias: list[date]) -> None:
-    """Plano completo (dia a dia + estimativas + lógica geral) por e-mail --
-    esse conteúdo "não se encaixa" na aba "Plano da Semana" (ver
-    _linhas_plano, que só guarda 1 linha por dia como histórico), então vai
-    só pro e-mail e pro print do terminal."""
-    assunto = f"Plano de treino -- semana de {dias[0].strftime('%d/%m')} a {dias[-1].strftime('%d/%m')}"
-    enviar_email(assunto, _texto_plano(plano, dias))
-
-
-if __name__ == "__main__":
-    # Idempotência ponta a ponta: semana que já tem plano na planilha não é
-    # regerada. Reprocessar (retry manual, cron + disparo manual) chamaria o
-    # Gemini de novo e o LLM devolve OUTRO plano -- a planilha (idempotente)
-    # ficaria com o primeiro enquanto e-mail e relógio receberiam o segundo.
-    # Checa antes de tocar no banco ou no Gemini, pra não gastar nada.
-    # FORCAR_REGERAR=true (input `forcar` do disparo manual) gera um plano
-    # novo mesmo assim e substitui o antigo -- mas só depois de o novo ser
-    # aprovado pela revisão, então uma falha na geração não apaga nada.
-    spreadsheet = conectar_planilha()
-    dias = _semana_alvo()
-    forcar = os.environ.get("FORCAR_REGERAR") == "true"
-    if plano_ja_escrito(spreadsheet, dias):
-        if not forcar:
-            print(
-                f"[plano da semana de {dias[0]} já existe em '{ABA_PLANO}': nada a gerar, "
-                "nenhum e-mail nem treino novo enviado]"
-            )
-            raise SystemExit(0)
-        print(f"[regeração forçada: o plano de {dias[0]} em '{ABA_PLANO}' será substituído se o novo for aprovado]")
-
-    con = conectar()
-
-    # data em BRT, não CURRENT_DATE do Postgres (servidor roda em UTC) --
-    # mesmo cuidado de _semana_alvo, ver hoje_brt().
-    corte_janela = hoje_brt() - timedelta(days=JANELA_SEMANAS * 7)
-    colunas_ativ, linhas_ativ = _consultar(
-        con,
-        "SELECT * FROM vw_sessoes_ia WHERE data >= %s ORDER BY data",
-        (corte_janela,),
-    )
-    colunas_resumo, linhas_resumo_desc = _consultar(
-        con, "SELECT * FROM vw_resumo_semanal ORDER BY semana_inicio DESC LIMIT %s", (JANELA_SEMANAS,)
-    )
-    linhas_resumo = list(reversed(linhas_resumo_desc))  # ordem cronológica pro prompt
-
-    sessoes = _sessoes_antes_de(con, dias[0])
-    retomada = _estado_retomada(sessoes, dias[0], _trote_prescrito(spreadsheet, dias[0]))
-    if retomada:
-        pace_trote, fc_teto = _referencias_trote(con, hoje_brt())
-        retomada = retomada.model_copy(update={"pace_trote": pace_trote, "fc_teto": fc_teto})
-    teto_km = None if retomada else _teto_sessao_km(sessoes)
-    acwr_atual = _acwr_semana_atual(colunas_resumo, linhas_resumo)
-    dor_recente = _dor_mais_recente(colunas_ativ, linhas_ativ)
-
-    # dias passados (SEMANA_PLANO=atual) + dia seguinte a uma corrida real
-    # (alternância na virada da semana, ou dentro da semana já começada)
-    _, linhas_corrida = _consultar(
-        con,
-        "SELECT DISTINCT data FROM vw_sessoes WHERE tipo_treino <> 'Caminhada' AND data >= %s AND data < %s",
-        (dias[0] - timedelta(days=1), hoje_brt()),
-    )
-    datas_corrida = {linha[0] for linha in linhas_corrida}
-    dias_bloqueados = [d for d in dias if d in _dias_passados(dias) or d - timedelta(days=1) in datas_corrida]
-    livres = [d for d in dias if d not in dias_bloqueados]
-    max_sessoes = _max_sessoes((livres[-1] - livres[0]).days + 1) if livres else 0
-
-    if retomada:
-        instrucoes = [_instrucao_retomada(retomada, max_sessoes)]
-    else:
-        instrucoes = [_instrucao_guardrail_acwr(acwr_atual), _instrucao_teto_sessao(teto_km)]
-    instrucoes = [i for i in instrucoes + [_instrucao_guardrail_dor(dor_recente)] if i]
+def _imprimir_contexto(ctx: ContextoSemana) -> None:
     if EM_CI:
-        print(f"[{'retomada' if retomada else 'regime normal'}: {len(instrucoes)} instrução(ões) de carga/dor]\n")
-    elif retomada:
-        print(f"[retomada: {retomada.decisao}; até {max_sessoes} sessão(ões); dor recente: {dor_recente}]\n")
+        print(f"[{'retomada' if ctx.retomada else 'regime normal'}: {len(ctx.instrucoes)} instrução(ões) de carga/dor]\n")
+    elif ctx.retomada:
+        print(f"[retomada: {ctx.retomada.decisao}; até {ctx.max_sessoes} sessão(ões); dor recente: {ctx.dor_recente}]\n")
     else:
-        print(f"[regime normal -- ACWR: {acwr_atual}, teto por sessão: {teto_km} km, dor recente: {dor_recente}]\n")
+        print(f"[regime normal -- ACWR: {ctx.acwr}, teto por sessão: {ctx.teto_km} km, dor recente: {ctx.dor_recente}]\n")
 
-    observacoes = _observacoes_recentes(spreadsheet)
 
-    prompt = _construir_prompt(
-        _formatar_tabela(colunas_ativ, linhas_ativ),
-        _formatar_tabela(colunas_resumo, linhas_resumo),
-        _faixas_por_tipo(colunas_ativ, linhas_ativ),
-        observacoes,
-        instrucoes,
-        dias,
-        dias_bloqueados,
-    )
-    plano = None
-    sessao_retomada = None
+def gerar_plano(ctx: ContextoSemana) -> tuple[PlanoSemanal, SessaoRetomada | None]:
+    """Gera até MAX_TENTATIVAS_REVISAO candidatos: cada um passa primeiro
+    pelas regras determinísticas (`violacoes_regras`) e só depois pela
+    revisão de coerência (outra chamada ao LLM) -- a revisão nunca vê, e
+    portanto nunca aprova, um plano que o Python reprovou."""
+    prompt = ctx.prompt()
     for tentativa in range(1, MAX_TENTATIVAS_REVISAO + 1):
-        candidato = _plano_semanal(gerar_analise(prompt))
-        problemas = _violacoes_regras(candidato, dias, retomada, teto_km, dias_bloqueados)
+        rotulo = f"tentativa {tentativa}/{MAX_TENTATIVAS_REVISAO}"
+        candidato = plano_semanal(gerar_analise(prompt))
+        problemas = violacoes_regras(candidato, ctx.dias, ctx.retomada, ctx.teto_km, ctx.dias_bloqueados)
         if problemas:
-            if EM_CI:
-                print(f"[tentativa {tentativa}/{MAX_TENTATIVAS_REVISAO} fora das regras de carga: {len(problemas)} problema(s)]")
-            else:
-                print(f"[tentativa {tentativa}/{MAX_TENTATIVAS_REVISAO} fora das regras de carga:]")
-                for problema in problemas:
-                    print(f"  - {problema}")
+            _relatar(f"[{rotulo} fora das regras de carga: {len(problemas)} problema(s)]",
+                     f"[{rotulo} fora das regras de carga:]", problemas)
             continue
-        if retomada:
-            sessao_retomada = _aplicar_retomada(candidato, retomada)
-        revisao = revisar_coerencia(prompt, _texto_plano(candidato, dias))
+        sessao_retomada = aplicar_retomada(candidato, ctx.retomada) if ctx.retomada else None
+        revisao = revisar_coerencia(prompt, texto_plano(candidato, ctx.dias))
         if revisao.coerente:
-            plano = candidato
             if tentativa > 1:
-                print(f"[plano aprovado pela revisão de coerência na tentativa {tentativa}/{MAX_TENTATIVAS_REVISAO}]")
-            break
-        if EM_CI:
-            print(f"[revisão reprovou a tentativa {tentativa}/{MAX_TENTATIVAS_REVISAO}: {len(revisao.problemas)} problema(s)]")
-            continue
-        print(f"[revisão reprovou a tentativa {tentativa}/{MAX_TENTATIVAS_REVISAO}: {revisao.motivo}]")
-        for problema in revisao.problemas:
-            print(f"  - {problema}")
+                print(f"[plano aprovado pela revisão de coerência na {rotulo}]")
+            return candidato, sessao_retomada
+        _relatar(f"[revisão reprovou a {rotulo}: {len(revisao.problemas)} problema(s)]",
+                 f"[revisão reprovou a {rotulo}: {revisao.motivo}]", revisao.problemas)
+    raise RuntimeError(
+        f"Plano reprovado pela revisão de coerência em {MAX_TENTATIVAS_REVISAO} "
+        "tentativas seguidas -- abortando sem escrever na planilha nem enviar e-mail."
+    )
 
-    if plano is None:
-        raise RuntimeError(
-            f"Plano reprovado pela revisão de coerência em {MAX_TENTATIVAS_REVISAO} "
-            "tentativas seguidas -- abortando sem escrever na planilha nem enviar e-mail."
-        )
 
-    _imprimir_plano(plano, dias)
+def entregar(spreadsheet, plano: PlanoSemanal, ctx: ContextoSemana, sessao_retomada: SessaoRetomada | None, forcar: bool) -> None:
+    dias = ctx.dias
+    imprimir_plano(plano, dias)
 
     if forcar:
         apagadas_plano, apagadas_ativ = apagar_plano_da_semana(spreadsheet, dias)
@@ -1204,4 +129,31 @@ if __name__ == "__main__":
     except Exception as erro:  # noqa: BLE001 -- best-effort de propósito
         print(f"[Garmin: não foi possível enviar os treinos ao relógio: {type(erro).__name__}: {erro}]")
 
+
+if __name__ == "__main__":
+    # Idempotência ponta a ponta: semana que já tem plano na planilha não é
+    # regerada. Reprocessar (retry manual, cron + disparo manual) chamaria o
+    # Gemini de novo e o LLM devolve OUTRO plano -- a planilha (idempotente)
+    # ficaria com o primeiro enquanto e-mail e relógio receberiam o segundo.
+    # Checa antes de tocar no banco ou no Gemini, pra não gastar nada.
+    # FORCAR_REGERAR=true (input `forcar` do disparo manual) gera um plano
+    # novo mesmo assim e substitui o antigo -- mas só depois de o novo ser
+    # aprovado pela revisão, então uma falha na geração não apaga nada.
+    spreadsheet = conectar_planilha()
+    dias = semana_alvo()
+    forcar = os.environ.get("FORCAR_REGERAR") == "true"
+    if plano_ja_escrito(spreadsheet, dias):
+        if not forcar:
+            print(
+                f"[plano da semana de {dias[0]} já existe em '{ABA_PLANO}': nada a gerar, "
+                "nenhum e-mail nem treino novo enviado]"
+            )
+            raise SystemExit(0)
+        print(f"[regeração forçada: o plano de {dias[0]} em '{ABA_PLANO}' será substituído se o novo for aprovado]")
+
+    con = conectar()
+    ctx = carregar_contexto(con, spreadsheet, dias)
+    _imprimir_contexto(ctx)
+    plano, sessao_retomada = gerar_plano(ctx)
+    entregar(spreadsheet, plano, ctx, sessao_retomada, forcar)
     con.close()

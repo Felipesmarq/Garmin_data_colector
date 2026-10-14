@@ -229,7 +229,7 @@ SELECT
     -- e 4,9%. O corte fica perto das caminhadas porque a 1ª sessão do
     -- protocolo de retomada (3 min de trote em 30) dá ~10%, e erro de
     -- detecção não pode jogá-la pra Caminhada (ela sairia da conta de
-    -- progressão em analisar_com_ia._estado_retomada). Sem isso, caminhada
+    -- progressão em analyze/retomada.estado_retomada). Sem isso, caminhada
     -- de 40min em FC baixa virava "Longão".
     CASE
         WHEN a.efeito_treino_label = 'UNKNOWN' THEN 'Caminhada'
@@ -340,7 +340,7 @@ FROM vw_sessoes;
 
 -- =====================================================================
 -- VIEW: vw_resumo_semanal — agregação por semana de domingo a sábado (a
--- mesma semana do plano, ver analisar_com_ia._semana_alvo) + ACWR (Acute:Chronic Workload Ratio -- ver CASE_DO_PROJETO_1.md
+-- mesma semana do plano, ver analyze/semana.semana_alvo) + ACWR (Acute:Chronic Workload Ratio -- ver CASE_DO_PROJETO_1.md
 -- seção 6.1). Granularidade semanal (não diária) porque o relatório roda
 -- 1x/semana: carga aguda = km corridos da semana corrente, carga crônica =
 -- média das últimas 4 semanas (semana corrente + 3 anteriores). Zona
