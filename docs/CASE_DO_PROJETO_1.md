@@ -97,7 +97,7 @@ trocado por Postgres externo.
 ```
 Garmin_data_colector/
 ├── .github/workflows/
-│   ├── sync_atividades.yml     # diário, 21h BRT: atividades + recuperação + dor + dashboard
+│   ├── sync_atividades.yml     # seg-sáb, 6h BRT: atividades + recuperação + dor + dashboard
 │   └── analise_semanal.yml     # domingo, 6h BRT (reserva às 10h): resync + plano da semana
 ├── src/
 │   ├── config.py               # raiz do projeto, leitura do .env, flag EM_CI
@@ -779,7 +779,8 @@ sucessivas com os mesmos dados de entrada.
 **Requisitos:** dois workflows, sem Docker (`actions/setup-python`,
 Python 3.12 -- decisão tomada nesta fase, ver seção 11; trocado por
 `astral-sh/setup-uv` numa sessão posterior, ver seção 11): `sync_atividades.yml`
-(diário, 21h BRT -- carrega atividades, recuperação, sincroniza dor via
+(segunda a sábado, 6h BRT desde 2026-10, antes todo dia às 21h -- no
+domingo a análise semanal já roda o sync; carrega atividades, recuperação, sincroniza dor via
 `load_dor.py` e atualiza o dashboard via `planilha_desempenho.py`, tudo
 no mesmo workflow) e `analise_semanal.yml` (domingo, 6h BRT desde 2026-10, antes 20h -- resincroniza
 atividades/recuperação/dor na própria execução, não depende do horário

@@ -9,10 +9,11 @@ do negócio) está em [`docs/`](docs/index.md).
 ## Como o projeto roda
 
 **Na rotina, tudo é automático.** Dois workflows do GitHub Actions executam
-o pipeline inteiro sem nenhum comando seu: todo dia às 21h (horário de
+o pipeline inteiro sem nenhum comando seu: de segunda a sábado às 6h (horário de
 Brasília) as atividades são sincronizadas e a planilha atualizada, e todo
-domingo às 6h o plano da semana (domingo a sábado) é gerado, gravado na
-planilha, enviado por e-mail e agendado no relógio.
+domingo às 6h a mesma sincronização roda e, em seguida, o plano da semana
+(domingo a sábado) é gerado, gravado na planilha, enviado por e-mail e
+agendado no relógio.
 
 **Os comandos `docker compose` deste README são só pra teste local**, um
 passo de cada vez (cada script do pipeline roda isolado, como um
@@ -267,7 +268,8 @@ Dois workflows em `.github/workflows/`, sem Docker (roda com `uv`
 -- `astral-sh/setup-uv`, instala Python 3.12 e as dependências a partir
 de `uv.lock` direto no runner):
 
-- **`sync_atividades.yml`** — todo dia, 21h BRT (`0 0 * * *` UTC): carrega
+- **`sync_atividades.yml`** — segunda a sábado, 6h BRT (`0 9 * * 1-6` UTC; no domingo a
+  análise semanal já roda o sync): carrega
   atividades, recuperação, sincroniza dor e atualiza o dashboard da
   planilha.
 - **`analise_semanal.yml`** — domingo, 6h BRT (`0 9 * * 0` UTC), com reserva às
@@ -327,7 +329,7 @@ enquanto -- não influencia a geração do plano seguinte.
 
 ```
 ├── .github/workflows/
-│   ├── sync_atividades.yml     # diário, 21h BRT -- atividades + recuperação + dor + dashboard
+│   ├── sync_atividades.yml     # seg-sáb, 6h BRT -- atividades + recuperação + dor + dashboard
 │   └── analise_semanal.yml     # domingo, 6h BRT -- resync + plano da semana via Gemini
 ├── explore/                    # scripts de investigação (Fase 0, fora do pipeline final)
 │   ├── inspect_garmin.py

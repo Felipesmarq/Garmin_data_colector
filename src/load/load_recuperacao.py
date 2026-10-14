@@ -42,9 +42,9 @@ if __name__ == "__main__":
     api = conectar_garmin()
     dias = []
     for i in range(7):
-        # hoje_brt(), não date.today() -- esse job roda às 21h BRT = 00h
-        # UTC (virada de dia), então date.today() no runner (UTC) já
-        # devolveria amanhã em BRT em qualquer atraso de agendamento.
+        # hoje_brt(), não date.today() -- o runner roda em UTC, 3h à frente
+        # do Brasil; perto da virada do dia, date.today() devolveria a data
+        # errada (bug real quando este job rodava às 21h BRT = 00h UTC).
         dia = hoje_brt() - timedelta(days=i)
         r = recuperacao_diaria(api, dia)
         if r:

@@ -6,7 +6,7 @@ semanal rodava domingo às 20h BRT (23h UTC), um atraso de pouco mais de 1h
 no cron já fazia `date.today()` virar segunda-feira em UTC enquanto ainda
 era domingo no Brasil -- e isso aconteceu em produção, fazendo o plano
 semanal pular pra semana errada (ver CASE_DO_PROJETO_1.md seção 11). O
-sync diário roda às 21h BRT = 00h UTC, bem na virada.
+sync diário rodava às 21h BRT = 00h UTC, bem na virada (hoje roda às 6h BRT).
 
 Qualquer lugar do pipeline que precise saber "que dia é hoje" (calcular a
 próxima semana, cortar uma janela de N dias, decidir "ontem") deve usar
