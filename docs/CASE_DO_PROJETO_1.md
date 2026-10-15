@@ -985,14 +985,55 @@ investigação técnica a fazer durante a implementação.
 ### Fase 13 — Ajuste fino
 Frequência de polling, prompt, extras — a definir com base no uso real.
 
+### Fase A — Segurança (sugestões do treinador #1-#6, implementada em 2026-10-15)
+**Requisitos e decisões do usuário:**
+- **Dor na tíbia separada** (sugestões #3/#4): na aba "Dor", `dor` passa a
+  ser só a dor na tíbia durante/depois do treino (o histórico já era de
+  canela); entram `dor_tibia_manha` (manhã seguinte), `palpacao_dor` (dor
+  ao apertar a borda interna da tíbia -- critério diagnóstico do ensaio de
+  Moen et al.) e `outra_dor` (outros desconfortos, só registrados). A dor
+  na tíbia de uma sessão é a maior das três (`src/sintomas.py`).
+- **Limiar único** (#5): qualquer dor na tíbia (>= 1) nas duas fases, como
+  no protocolo de Warden para lesão óssea (sessão sem dor durante, depois e
+  no dia seguinte). Na retomada volta um estágio; fora dela, a semana fica
+  sem intensidade e o teto por sessão perde os 10% de aumento (vale a
+  sessão mais longa dos últimos 30 dias). Antes eram 1 e 2.
+- **3 sessões de evolução fixas** (#1/#2): a retomada tem exatamente 3
+  sessões de evolução por semana (menos só se não couberem, em semana já
+  começada), nunca no sábado (a dor da manhã seguinte tem que estar
+  registrada antes do plano de domingo às 6h). Só sobe de estágio com as 3
+  cumpridas (90% do trote prescrito cada) e confirmadas sem dor (`dor` e
+  `dor_tibia_manha` iguais a 0, palpação sem dor). A IA pode acrescentar
+  caminhadas leves (tipo `Caminhada`, até 45 min), que não contam como dia
+  de corrida e vão pro relógio como treino de caminhada.
+- **Sinais de alerta** (#6): `sinal_alerta` na aba "Dor" (dor pontual na
+  tíbia, ao caminhar, em repouso ou à noite -- podem indicar fratura por
+  estresse). Com um alerta sem `liberado_em`: o sync diário
+  (`src/load/alertas.py`) marca os dias planejados restantes da semana como
+  `SUSPENSO`, tira os treinos do relógio e manda e-mail; a análise de
+  domingo não gera plano (grava a semana como "Suspenso" e manda e-mail).
+  Liberação é manual (`liberado_em`, de preferência depois de avaliação), e
+  o plano seguinte recomeça um estágio abaixo.
+
+**Critérios de aceite:**
+- [x] Regras testadas offline com cenários sintéticos: sobe com 3 sessões
+  cumpridas e confirmadas sem dor; repete com 2, com uma abaixo de 90% ou
+  com a manhã seguinte sem registro; volta com dor 1 (durante, manhã ou
+  palpação, inclusive numa caminhada) e depois de alerta.
+- [x] Conferência do plano em Python reprova: número de sessões de
+  evolução diferente do pedido, evolução no sábado, caminhada acima de 45
+  min, Longão na retomada; fora dela, intensidade com dor e sessão acima do
+  teto sem aumento.
+- [x] Alerta ativo/liberado testado contra o banco real numa transação
+  desfeita no final; caminhada montada como treino de caminhada (walking)
+  pro relógio.
+- [ ] Primeiro uso real: aba "Dor" migrada com as colunas novas e um
+  domingo com o plano gerado pelas regras novas.
+
 ### Próximas fases (sugestões do treinador, avaliadas em 2026-10-14)
 Ordem combinada com o usuário, depois de uma limpeza/modularização do
 código (feita em 2026-10-14):
-1. **Segurança:** sinais de alerta (dor pontual na tíbia, dor ao caminhar,
-   em repouso ou à noite) suspendem o plano e avisam pra procurar
-   avaliação; dor na tíbia separada de outros desconfortos, incluindo a
-   manhã seguinte; mesmo limiar de dor nas duas fases; 3 sessões de
-   evolução fixas na retomada + extras leves da IA.
+1. **Segurança:** feita -- ver Fase A acima.
 2. **Força na fase de retomada:** catálogo de exercícios, prescrição
    calculada em Python, validador, coleta de esforço/RIR e teste de
    elevação de calcanhar; treino de força no relógio.

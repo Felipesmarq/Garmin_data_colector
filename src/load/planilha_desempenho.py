@@ -56,6 +56,9 @@ STATUS_PLANEJADO = "PLANEJADO"
 STATUS_REALIZADO_DENTRO_DA_MARGEM = "REALIZADO_DENTRO_DA_MARGEM"
 STATUS_REALIZADO_FORA_DA_MARGEM = "REALIZADO_FORA_DA_MARGEM"
 STATUS_NAO_REALIZADO = "NÃO_REALIZADO"
+# Dia planejado cancelado por sinal de alerta (src/load/alertas.py) -- não é
+# resolvido nem gera lembrete.
+STATUS_SUSPENSO = "SUSPENSO"
 
 # nome de exibição, quando difere da coluna real (ex.: escrevemos km/h na
 # planilha, mas a coluna em vw_sessoes -- e o valor bruto da Garmin -- é m/s)

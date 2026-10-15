@@ -36,7 +36,11 @@ def dias_passados(dias: list[date]) -> list[date]:
     return [d for d in dias if d < hoje]
 
 
-def max_sessoes(dias_livres: int) -> int:
-    """Máximo de sessões que cabem em `dias_livres` dias seguidos sem duas
-    em dias seguidos (regra de alternância): 7 dias -> 4."""
-    return (dias_livres + 1) // 2
+def max_corridas(livres: list[date]) -> int:
+    """Quantas corridas cabem nos dias livres (em ordem) sem duas em dias
+    seguidos -- a regra de alternância. 7 dias livres -> 4."""
+    total, ultimo = 0, None
+    for d in livres:
+        if ultimo is None or (d - ultimo).days > 1:
+            total, ultimo = total + 1, d
+    return total

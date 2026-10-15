@@ -11,6 +11,7 @@ import gspread
 import psycopg
 
 from src.analyze.guardrails import (
+    AUMENTO_SESSAO_MAX,
     JANELA_SESSAO_DIAS,
     acwr_semana_atual,
     dor_mais_recente,
@@ -19,12 +20,20 @@ from src.analyze.guardrails import (
     instrucao_teto_sessao,
     teto_sessao_km,
 )
-from src.analyze.modelos import Sessao
+from src.analyze.modelos import DIAS_SEMANA_PT, Sessao
 from src.analyze.prompt import JANELA_SEMANAS, construir_prompt, faixas_por_tipo, formatar_tabela
-from src.analyze.retomada import Retomada, estado_retomada, instrucao_retomada, referencias_trote, trote_prescrito
-from src.analyze.semana import dias_passados, max_sessoes
+from src.analyze.retomada import (
+    RETOMADA_SESSOES,
+    Retomada,
+    estado_retomada,
+    instrucao_retomada,
+    referencias_trote,
+    trote_prescrito,
+)
+from src.analyze.semana import dias_passados, max_corridas
 from src.db import consultar
 from src.planilha import obter_aba
+from src.sintomas import LIMIAR_DOR_TIBIA, alertas_desde
 from src.tempo import hoje_brt
 
 ABA_OBSERVACOES = "Observações"
@@ -61,25 +70,25 @@ def sessoes_antes_de(con: psycopg.Connection, inicio_semana: date) -> list[Sessa
     conservador)."""
     _, linhas = consultar(
         con,
-        "SELECT data, tipo_treino, COALESCE(segundos_correndo, duracao_min * 60), km_corridos, dor "
+        "SELECT data, tipo_treino, COALESCE(segundos_correndo, duracao_min * 60), km_corridos, "
+        "dor, dor_tibia_manha, palpacao_dor "
         "FROM vw_sessoes WHERE data >= %s AND data < %s ORDER BY data",
         (inicio_semana - timedelta(days=JANELA_SESSAO_DIAS), inicio_semana),
     )
     return [Sessao(*linha) for linha in linhas]
 
 
-def _dias_bloqueados(con: psycopg.Connection, dias: list[date]) -> list[date]:
-    """Dias que têm que ser descanso: os que já passaram (SEMANA_PLANO=atual)
-    e o dia seguinte a uma corrida real -- a alternância vale também na
-    virada da semana, ou dentro da semana já começada."""
+def _dias_pos_corrida(con: psycopg.Connection, dias: list[date]) -> list[date]:
+    """Dias da semana que vêm logo depois de uma corrida real -- não podem
+    ter corrida (caminhada pode): a alternância vale também na virada da
+    semana, ou dentro da semana já começada."""
     _, linhas = consultar(
         con,
         "SELECT DISTINCT data FROM vw_sessoes WHERE tipo_treino <> 'Caminhada' AND data >= %s AND data < %s",
         (dias[0] - timedelta(days=1), hoje_brt()),
     )
     datas_corrida = {linha[0] for linha in linhas}
-    passados = dias_passados(dias)
-    return [d for d in dias if d in passados or d - timedelta(days=1) in datas_corrida]
+    return [d for d in dias if d - timedelta(days=1) in datas_corrida]
 
 
 @dataclass
@@ -91,22 +100,34 @@ class ContextoSemana:
     linhas_resumo: list[tuple]  # ordem cronológica
     sessoes: list[Sessao]
     retomada: Retomada | None
+    houve_alerta: bool  # sinal de alerta desde o último plano (já liberado, senão nem chega aqui)
     teto_km: float | None  # teto por sessão (só fora da retomada)
     acwr: float | None
-    dor_recente: int | None
-    dias_bloqueados: list[date]
-    max_sessoes: int
+    dor_recente: int | None  # dor na tíbia da sessão mais recente com registro
+    dias_passados: list[date]  # têm que ser descanso
+    dias_pos_corrida: list[date]  # sem corrida (caminhada pode)
+    sessoes_evolucao: int  # sessões de evolução da retomada nesta semana
     observacoes: str
 
     @property
+    def restricao_dor(self) -> bool:
+        """Fora da retomada: dor na tíbia recente ou alerta recente tiram
+        intensidade e aumento de carga da semana."""
+        return (self.dor_recente or 0) >= LIMIAR_DOR_TIBIA or self.houve_alerta
+
+    @property
     def instrucoes(self) -> list[str]:
-        """Instruções obrigatórias do prompt: o protocolo de retomada, ou
-        ACWR + teto por sessão fora dela; a de dor vale nos dois regimes."""
+        """Instruções obrigatórias do prompt: o protocolo de retomada (que já
+        trata dor e alerta pelo estágio), ou ACWR + teto por sessão + dor
+        fora dela."""
         if self.retomada:
-            carga = [instrucao_retomada(self.retomada, self.max_sessoes)]
-        else:
-            carga = [instrucao_guardrail_acwr(self.acwr), instrucao_teto_sessao(self.teto_km)]
-        return [i for i in carga + [instrucao_guardrail_dor(self.dor_recente)] if i]
+            return [instrucao_retomada(self.retomada, self.sessoes_evolucao, DIAS_SEMANA_PT[len(self.dias) - 1])]
+        carga = [
+            instrucao_guardrail_acwr(self.acwr),
+            instrucao_teto_sessao(self.teto_km, com_aumento=not self.restricao_dor),
+            instrucao_guardrail_dor(self.dor_recente, self.houve_alerta),
+        ]
+        return [i for i in carga if i]
 
     def prompt(self) -> str:
         return construir_prompt(
@@ -116,7 +137,8 @@ class ContextoSemana:
             self.observacoes,
             self.instrucoes,
             self.dias,
-            self.dias_bloqueados,
+            self.dias_passados,
+            self.dias_pos_corrida,
         )
 
 
@@ -132,13 +154,24 @@ def carregar_contexto(con: psycopg.Connection, spreadsheet: gspread.Spreadsheet,
     )
 
     sessoes = sessoes_antes_de(con, dias[0])
-    retomada = estado_retomada(sessoes, dias[0], trote_prescrito(spreadsheet, dias[0]))
+    prescricao = trote_prescrito(spreadsheet, dias[0])
+    # alerta desde o início da semana do último estágio prescrito (ou na
+    # semana anterior, sem plano de retomada) -- a progressão volta um estágio
+    desde_alerta = prescricao.inicio_semana if prescricao else dias[0] - timedelta(days=7)
+    houve_alerta = bool(alertas_desde(con, desde_alerta))
+    retomada = estado_retomada(sessoes, dias[0], prescricao.trote_bloco if prescricao else None, houve_alerta)
     if retomada:
         pace_trote, fc_teto = referencias_trote(con, hoje_brt())
         retomada = retomada.model_copy(update={"pace_trote": pace_trote, "fc_teto": fc_teto})
 
-    bloqueados = _dias_bloqueados(con, dias)
-    livres = [d for d in dias if d not in bloqueados]
+    passados = dias_passados(dias)
+    pos_corrida = _dias_pos_corrida(con, dias)
+    livres = [d for d in dias if d not in passados and d not in pos_corrida]
+    # evolução da retomada nunca no último dia (a dor da manhã seguinte tem
+    # que estar registrada antes do plano seguinte, que roda domingo às 6h)
+    livres_evolucao = [d for d in livres if d != dias[-1]]
+    dor_recente = dor_mais_recente(sessoes)
+    restricao = (dor_recente or 0) >= LIMIAR_DOR_TIBIA or houve_alerta
     linhas_resumo = list(reversed(linhas_resumo_desc))  # ordem cronológica pro prompt
     return ContextoSemana(
         dias=dias,
@@ -148,10 +181,12 @@ def carregar_contexto(con: psycopg.Connection, spreadsheet: gspread.Spreadsheet,
         linhas_resumo=linhas_resumo,
         sessoes=sessoes,
         retomada=retomada,
-        teto_km=None if retomada else teto_sessao_km(sessoes),
+        houve_alerta=houve_alerta,
+        teto_km=None if retomada else teto_sessao_km(sessoes, aumento=0.0 if restricao else AUMENTO_SESSAO_MAX),
         acwr=acwr_semana_atual(colunas_resumo, linhas_resumo),
-        dor_recente=dor_mais_recente(colunas_ativ, linhas_ativ),
-        dias_bloqueados=bloqueados,
-        max_sessoes=max_sessoes((livres[-1] - livres[0]).days + 1) if livres else 0,
+        dor_recente=dor_recente,
+        dias_passados=passados,
+        dias_pos_corrida=pos_corrida,
+        sessoes_evolucao=min(RETOMADA_SESSOES, max_corridas(livres_evolucao)),
         observacoes=observacoes_recentes(spreadsheet),
     )

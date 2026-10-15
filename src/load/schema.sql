@@ -124,6 +124,15 @@ CREATE TABLE IF NOT EXISTS stg_dor (
     carregado_em     TIMESTAMP DEFAULT current_timestamp
 );
 
+-- Fase A de segurança (2026-10): `dor` passa a ser a dor na tíbia
+-- durante/depois do treino; os demais sintomas ficam em colunas próprias
+-- (ver src/sintomas.py). ADD COLUMN IF NOT EXISTS: seguro de reaplicar.
+ALTER TABLE stg_dor ADD COLUMN IF NOT EXISTS dor_tibia_manha INTEGER CHECK (dor_tibia_manha BETWEEN 0 AND 5);
+ALTER TABLE stg_dor ADD COLUMN IF NOT EXISTS palpacao_dor BOOLEAN;  -- dor ao apertar a borda interna da tíbia
+ALTER TABLE stg_dor ADD COLUMN IF NOT EXISTS outra_dor VARCHAR;  -- outros desconfortos, só registrados
+ALTER TABLE stg_dor ADD COLUMN IF NOT EXISTS sinal_alerta VARCHAR;  -- ver sintomas.SINAIS_ALERTA
+ALTER TABLE stg_dor ADD COLUMN IF NOT EXISTS liberado_em DATE;  -- libera o plano depois de um sinal de alerta
+
 -- =====================================================================
 -- VIEW: vw_sessoes — 1 linha por atividade (não por dia -- múltiplas
 -- atividades no mesmo dia entram todas). Substitui a antiga fct_sessoes
@@ -260,7 +269,12 @@ SELECT
     -- run/walk, conta a distância toda (lado conservador).
     a.distancia_m / 1000.0 * COALESCE(
         s.segundos_correndo / NULLIF(s.segundos_correndo + s.segundos_caminhando, 0), 1
-    ) AS km_corridos
+    ) AS km_corridos,
+    d.dor_tibia_manha,
+    d.palpacao_dor,
+    d.outra_dor,
+    d.sinal_alerta,
+    d.liberado_em
 FROM stg_atividades a
 LEFT JOIN zonas z ON z.activity_id = a.activity_id
 LEFT JOIN (
@@ -335,7 +349,10 @@ SELECT
     localizacao_dor,
     comentario_dor,
     superficie,
-    tenis
+    tenis,
+    dor_tibia_manha,
+    palpacao_dor,
+    outra_dor
 FROM vw_sessoes;
 
 -- =====================================================================

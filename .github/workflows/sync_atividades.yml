@@ -87,6 +87,17 @@ jobs:
           retry_wait_seconds: 30
           command: uv run python -m src.load.load_dor
 
+      # Fase A de segurança: sinal de alerta na tíbia suspende os treinos
+      # restantes da semana (planilha e relógio) e manda e-mail -- logo depois
+      # de importar a aba "Dor", antes do dashboard resolver os dias planejados.
+      - name: Verificar sinais de alerta
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 5
+          max_attempts: 3
+          retry_wait_seconds: 30
+          command: uv run python -m src.load.alertas
+
       - name: Atualizar dashboard da planilha
         uses: nick-fields/retry@v3
         with:

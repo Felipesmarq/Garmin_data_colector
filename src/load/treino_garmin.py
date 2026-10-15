@@ -23,6 +23,7 @@ from garminconnect import Garmin
 from garminconnect.workout import (
     RunningWorkout,
     TargetType,
+    WalkingWorkout,
     WorkoutSegment,
     create_cooldown_step,
     create_distance_interval_step,
@@ -122,28 +123,37 @@ def _passos_retomada(retomada, pace_alvo: str | None) -> list:
     return [create_repeat_group(retomada.blocos, [caminhada, trote], 1)]
 
 
-def _treino(dia, data: date, passos: list, duracao_seg: int) -> RunningWorkout:
-    return RunningWorkout(
+ESPORTE_CORRIDA = {"sportTypeId": 1, "sportTypeKey": "running", "displayOrder": 1}
+ESPORTE_CAMINHADA = {"sportTypeId": 17, "sportTypeKey": "walking", "displayOrder": 17}
+
+
+def _eh_caminhada(tipo: str | None) -> bool:
+    return (tipo or "").strip().lower().startswith("caminhada")
+
+
+def _treino(dia, data: date, passos: list, duracao_seg: int, caminhada: bool = False) -> RunningWorkout | WalkingWorkout:
+    classe, esporte = (WalkingWorkout, ESPORTE_CAMINHADA) if caminhada else (RunningWorkout, ESPORTE_CORRIDA)
+    return classe(
         workoutName=_nome_treino(dia.tipo_treino, data),
         description=dia.motivo,
         estimatedDurationInSecs=duracao_seg,
-        workoutSegments=[
-            WorkoutSegment(
-                segmentOrder=1,
-                sportType={"sportTypeId": 1, "sportTypeKey": "running", "displayOrder": 1},
-                workoutSteps=passos,
-            )
-        ],
+        workoutSegments=[WorkoutSegment(segmentOrder=1, sportType=esporte, workoutSteps=passos)],
     )
 
 
-def construir_treino(dia, data: date, retomada=None) -> RunningWorkout | None:
+def construir_treino(dia, data: date, retomada=None) -> RunningWorkout | WalkingWorkout | None:
     """`dia` é um TreinoDia e `retomada` uma SessaoRetomada (duck typing -- não
     importa analisar_com_ia pra não criar dependência circular). None se não
     for treino enviável (descanso, ou sem distância nem duração pra definir o
-    passo principal)."""
+    passo principal). Caminhada vai como treino de caminhada, só com a
+    duração, sem alvo."""
     if dia.descanso or not dia.tipo_treino:
         return None
+    if _eh_caminhada(dia.tipo_treino):
+        if not dia.duracao_min:
+            return None
+        passos = [create_interval_step(dia.duracao_min * 60, 1)]
+        return _treino(dia, data, passos, int(dia.duracao_min * 60), caminhada=True)
     if retomada is not None:
         duracao = retomada.blocos * (retomada.caminhada_seg + retomada.trote_seg)
         return _treino(dia, data, _passos_retomada(retomada, dia.pace_alvo), duracao)
@@ -208,25 +218,44 @@ def enviar_treino(api: Garmin, dia, data: date, retomada=None) -> str | None:
 
     if treino is None:
         if existente:
-            api.unschedule_workout(existente["id"])
-            api.delete_workout(existente["workoutId"])
+            _remover(api, existente)
             return "removido"
         return None
 
+    caminhada = isinstance(treino, WalkingWorkout)
     if existente:
-        api.update_workout(existente["workoutId"], treino.to_dict())
-        return "atualizado"
+        esporte = (api.get_workout_by_id(existente["workoutId"]).get("sportType") or {}).get("sportTypeKey")
+        if esporte == ("walking" if caminhada else "running"):
+            api.update_workout(existente["workoutId"], treino.to_dict())
+            return "atualizado"
+        # trocou corrida <-> caminhada: o tipo de esporte não muda num update
+        _remover(api, existente)
 
-    criado = api.upload_running_workout(treino)
+    criado = api.upload_walking_workout(treino) if caminhada else api.upload_running_workout(treino)
     api.schedule_workout(criado["workoutId"], data.isoformat())
     return "criado"
+
+
+def _remover(api: Garmin, item: dict) -> None:
+    api.unschedule_workout(item["id"])
+    api.delete_workout(item["workoutId"])
+
+
+def remover_treino(api: Garmin, data: date) -> bool:
+    """Tira do calendário (e da biblioteca) o treino nosso agendado na data,
+    se houver -- usado quando um sinal de alerta suspende o plano."""
+    existente = _achar_workout_agendado(api, data)
+    if existente:
+        _remover(api, existente)
+    return existente is not None
 
 
 def enviar_plano(api: Garmin, dias_do_plano: list[tuple[date, object]], hoje: date, retomada=None) -> None:
     """Best-effort: uma falha num dia é registrada e o resto segue; nada é
     levantado pra fora. Só envia datas de hoje em diante -- agendar treino no
     passado não faz sentido (relógio nunca vai executá-lo). Com `retomada`,
-    toda sessão da semana vai com a estrutura de caminhada + trote dela."""
+    toda sessão de evolução da semana vai com a estrutura de caminhada +
+    trote dela; caminhada extra vai como treino de caminhada."""
     for data, dia in dias_do_plano:
         if data < hoje:
             continue

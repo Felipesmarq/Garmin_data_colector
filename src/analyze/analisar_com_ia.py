@@ -24,6 +24,7 @@ from src.analyze.entrega import (
     enviar_email_resumo,
     escrever_dias_planejados,
     escrever_plano,
+    escrever_semana_suspensa,
     imprimir_plano,
     plano_ja_escrito,
     texto_plano,
@@ -35,10 +36,12 @@ from src.analyze.retomada import SessaoRetomada, aplicar_retomada
 from src.analyze.semana import semana_alvo
 from src.config import EM_CI
 from src.db import conectar
+from src.email_util import enviar_email
 from src.extract.garmin import conectar as conectar_garmin
 from src.load.planilha_desempenho import ABA_ATIVIDADES, STATUS_PLANEJADO, ordenar_atividades
 from src.load.treino_garmin import enviar_plano as enviar_plano_garmin
 from src.planilha import conectar as conectar_planilha
+from src.sintomas import alertas_ativos, texto_alerta
 from src.tempo import hoje_brt
 
 # Fase 11 -- máximo de tentativas (gerar + revisar) antes de desistir e
@@ -61,9 +64,9 @@ def _imprimir_contexto(ctx: ContextoSemana) -> None:
     if EM_CI:
         print(f"[{'retomada' if ctx.retomada else 'regime normal'}: {len(ctx.instrucoes)} instrução(ões) de carga/dor]\n")
     elif ctx.retomada:
-        print(f"[retomada: {ctx.retomada.decisao}; até {ctx.max_sessoes} sessão(ões); dor recente: {ctx.dor_recente}]\n")
+        print(f"[retomada: {ctx.retomada.decisao}; {ctx.sessoes_evolucao} sessão(ões) de evolução; dor na tíbia recente: {ctx.dor_recente}]\n")
     else:
-        print(f"[regime normal -- ACWR: {ctx.acwr}, teto por sessão: {ctx.teto_km} km, dor recente: {ctx.dor_recente}]\n")
+        print(f"[regime normal -- ACWR: {ctx.acwr}, teto por sessão: {ctx.teto_km} km, dor na tíbia recente: {ctx.dor_recente}, alerta recente: {ctx.houve_alerta}]\n")
 
 
 def gerar_plano(ctx: ContextoSemana) -> tuple[PlanoSemanal, SessaoRetomada | None]:
@@ -75,7 +78,7 @@ def gerar_plano(ctx: ContextoSemana) -> tuple[PlanoSemanal, SessaoRetomada | Non
     for tentativa in range(1, MAX_TENTATIVAS_REVISAO + 1):
         rotulo = f"tentativa {tentativa}/{MAX_TENTATIVAS_REVISAO}"
         candidato = plano_semanal(gerar_analise(prompt))
-        problemas = violacoes_regras(candidato, ctx.dias, ctx.retomada, ctx.teto_km, ctx.dias_bloqueados)
+        problemas = violacoes_regras(candidato, ctx)
         if problemas:
             _relatar(f"[{rotulo} fora das regras de carga: {len(problemas)} problema(s)]",
                      f"[{rotulo} fora das regras de carga:]", problemas)
@@ -152,6 +155,20 @@ if __name__ == "__main__":
         print(f"[regeração forçada: o plano de {dias[0]} em '{ABA_PLANO}' será substituído se o novo for aprovado]")
 
     con = conectar()
+
+    # Sinal de alerta sem liberação: não sai plano (ver src/sintomas.py).
+    alertas = alertas_ativos(con)
+    if alertas:
+        semana_txt = f"{dias[0].strftime('%d/%m')} a {dias[-1].strftime('%d/%m')}"
+        escrever_semana_suspensa(spreadsheet, dias, "Plano suspenso por sinal de alerta na tíbia -- ver e-mail")
+        enviar_email(
+            "Plano da semana suspenso: sinal de alerta",
+            texto_alerta(alertas, f"O plano da semana de {semana_txt} não foi gerado."),
+        )
+        print(f"[sinal de alerta ativo: plano da semana de {dias[0]} suspenso, e-mail enviado]")
+        con.close()
+        raise SystemExit(0)
+
     ctx = carregar_contexto(con, spreadsheet, dias)
     _imprimir_contexto(ctx)
     plano, sessao_retomada = gerar_plano(ctx)

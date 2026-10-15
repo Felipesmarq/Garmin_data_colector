@@ -29,7 +29,8 @@ TIPOS_DE_TREINO = """\
 - Limiar (Threshold, 88-92% VO2max): contínuo ou em blocos longos (20-40min totais) -- eleva o limiar de lactato.
 - Intervalado (Interval, 95-100% VO2max): repetições de 3-5min com recuperação incompleta -- maximiza VO2max.
 - Tiro (Repetition, acima de 100% VO2max, ritmo de milha): repetições curtas com recuperação completa -- potência anaeróbica, velocidade, economia de corrida.
-- Fartlek (intensidade variável, sem estrutura fixa): variação livre de ritmo, recuperação em trote leve (não parado) -- mistura estímulo aeróbico/anaeróbico.\
+- Fartlek (intensidade variável, sem estrutura fixa): variação livre de ritmo, recuperação em trote leve (não parado) -- mistura estímulo aeróbico/anaeróbico.
+- Caminhada (sem trote): caminhada leve, recuperação ativa sem o impacto da corrida -- não conta como dia de corrida; use duracao_min.\
 """
 
 
@@ -39,8 +40,8 @@ REGRAS_COMPOSICAO_SEMANA = (
     "Tiro) por semana. Todos os outros dias de corrida têm que ser Rodagem/Recuperação ou "
     "Longão. Isso é regra fixa, não sugestão -- não decida o número de treinos fortes "
     "livremente a cada vez.\n"
-    "- Alternância hard/easy: nunca dois dias de corrida seguidos sem pelo menos 1 dia de "
-    "descanso entre eles."
+    "- Alternância hard/easy: nunca dois dias de corrida seguidos sem pelo menos 1 dia sem "
+    "corrida entre eles (descanso ou caminhada leve)."
 )
 
 
@@ -100,7 +101,8 @@ def construir_prompt(
     observacoes_txt: str,
     instrucoes_guardrail: list[str],
     dias: list[date],
-    dias_bloqueados: list[date],
+    dias_passados: list[date],
+    dias_pos_corrida: list[date],
 ) -> str:
     dias_txt = ", ".join(f"{nome} {d.strftime('%d/%m')}" for nome, d in zip(DIAS_SEMANA_PT, dias))
     partes = [
@@ -150,21 +152,23 @@ def construir_prompt(
     ]
     for instrucao in instrucoes_guardrail:
         partes += ["", instrucao]
-    if dias_bloqueados:
-        bloqueados_txt = ", ".join(
-            f"{DIAS_SEMANA_PT[dias.index(d)]} {d.strftime('%d/%m')}" for d in dias_bloqueados
-        )
+    def _txt(datas: list[date]) -> str:
+        return ", ".join(f"{DIAS_SEMANA_PT[dias.index(d)]} {d.strftime('%d/%m')}" for d in datas)
+
+    if dias_passados:
+        partes += ["", f"Dias que já passaram e obrigatoriamente são descanso (`descanso: true`): {_txt(dias_passados)}."]
+    if dias_pos_corrida:
         partes += [
             "",
-            f"Dias que obrigatoriamente são descanso (`descanso: true`): {bloqueados_txt} -- "
-            "ou já passaram, ou vêm logo depois de um dia em que o corredor correu (a regra "
-            "de alternância vale também na virada da semana).",
+            f"Dias sem corrida (caminhada leve pode): {_txt(dias_pos_corrida)} -- vêm logo "
+            "depois de um dia em que o corredor correu (a regra de alternância vale também na "
+            "virada da semana).",
         ]
     partes += [
         "",
         "Quantos dias de treino a semana tem é decisão sua, com base nos dados -- não há "
         "número fixo, só as regras acima (a alternância permite no máximo 4 dias de corrida "
-        "em 7).",
+        "em 7; caminhada não conta como dia de corrida).",
         "",
         "Responda em português. Monte o plano dia a dia da semana, "
         "**exatamente 7 dias, na ordem Domingo a Sábado, incluindo os dias de "

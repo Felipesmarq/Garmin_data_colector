@@ -14,7 +14,9 @@ class Sessao(NamedTuple):
     tipo_treino: str | None
     trote_seg: float | None  # tempo correndo (RWD_RUN); sem splits, a duração inteira
     km_corridos: float | None
-    dor: int | None
+    dor: int | None  # dor na tíbia durante/depois (0-5)
+    dor_manha: int | None  # dor na tíbia na manhã seguinte (0-5)
+    palpacao: bool | None  # dor ao apertar a borda interna da tíbia
 
 # A semana do plano vai de domingo a sábado (o cron roda domingo às 6h, ver
 # analise_semanal.yml) -- não é a semana ISO.

@@ -77,6 +77,22 @@ def escrever_plano(spreadsheet, plano: PlanoSemanal, dias: list[date]) -> int:
     return len(linhas)
 
 
+TIPO_SUSPENSO = "Suspenso"
+
+
+def escrever_semana_suspensa(spreadsheet, dias: list[date], motivo: str) -> int:
+    """Semana sem plano por sinal de alerta: grava os 7 dias como "Suspenso"
+    na aba "Plano da Semana" -- fica o registro, e a execução de reserva de
+    domingo vê a semana já escrita (plano_ja_escrito) em vez de mandar o
+    e-mail de novo. Liberado no meio da semana, a reexecução manual com
+    `forcar` apaga essas linhas e escreve o plano."""
+    if plano_ja_escrito(spreadsheet, dias):
+        return 0
+    aba = obter_aba(spreadsheet, ABA_PLANO, CABECALHO_PLANO, cor=COR_PLANO)
+    inserir_linhas(aba, [[nome, str(data), TIPO_SUSPENSO, "", "", "", "", motivo] for nome, data in zip(DIAS_SEMANA_PT, dias)])
+    return len(dias)
+
+
 def apagar_plano_da_semana(spreadsheet, dias: list[date]) -> tuple[int, int]:
     """Regeração forçada -- apaga o plano antigo da semana: as linhas da aba
     "Plano da Semana" e as linhas PLANEJADO de "Atividades". Linhas já

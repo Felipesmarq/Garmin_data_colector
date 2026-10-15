@@ -220,7 +220,26 @@ docker compose run --rm garmin python -m src.load.planilha_desempenho
 aba "Dor" as atividades que ainda não têm dor registrada (`activity_id`,
 `data`, `nome`, `tipo` — colunas de dor ficam em branco pra você
 preencher); depois importa de volta pra `stg_dor` (upsert por
-`activity_id`) as linhas que já têm a coluna `dor` preenchida.
+`activity_id`) as linhas que já têm algum sintoma preenchido.
+
+Colunas da aba "Dor" que você preenche, por atividade:
+
+| Coluna | O que registrar |
+|---|---|
+| `dor` | Dor na **tíbia** durante e depois do treino, de 0 a 5 |
+| `dor_tibia_manha` | Dor na tíbia na **manhã seguinte**, de 0 a 5 |
+| `palpacao_dor` | `sim` se dói ao apertar a borda interna da tíbia |
+| `outra_dor` | Outros desconfortos (texto livre, só registrado) |
+| `sinal_alerta` | Dor pontual na tíbia, ao caminhar, em repouso ou à noite (`nenhum` se não houver) |
+| `liberado_em` | Data em que um sinal de alerta foi liberado (de preferência depois de avaliação) |
+
+Qualquer dor na tíbia (1 ou mais) volta um estágio na retomada e tira
+intensidade e aumento de carga depois dela. Na retomada, o estágio só sobe
+com as 3 sessões da semana cumpridas e com `dor` e `dor_tibia_manha` iguais
+a 0 em todas. Um sinal de alerta suspende os treinos restantes da semana
+(planilha e relógio), manda um e-mail e trava o plano até `liberado_em`
+ser preenchido; o plano seguinte recomeça um estágio abaixo. Ver
+[`src/sintomas.py`](src/sintomas.py).
 
 `planilha_desempenho` sobrescreve as abas "Atividades" (snapshot de
 `vw_sessoes`: pace, velocidade, FC, efeito de treino) e "Resumo Semanal"
@@ -342,12 +361,14 @@ enquanto -- não influencia a geração do plano seguinte.
 │   ├── formato.py              # pace, números com vírgula, leitura de faixas de pace/FC
 │   ├── email_util.py           # envio de e-mail via Gmail SMTP (mecânica genérica)
 │   ├── tempo.py                # "hoje" no horário de Brasília
+│   ├── sintomas.py             # dor na tíbia e sinais de alerta (regras de segurança)
 │   ├── extract/garmin.py       # puxa atividades (+ splits run/walk) e recuperação diária da API
 │   ├── load/
 │   │   ├── schema.sql          # DDL: staging -> vw_sessoes -> vw_sessoes_ia -> vw_resumo_semanal
 │   │   ├── load_atividades.py  # upsert de atividades + splits
 │   │   ├── load_recuperacao.py
 │   │   ├── load_dor.py         # aba "Dor": exporta pendentes + importa preenchidas em stg_dor
+│   │   ├── alertas.py          # sinal de alerta: suspende os treinos restantes da semana e avisa
 │   │   ├── planilha_desempenho.py  # "Atividades" (upsert) + "Resumo Semanal" (snapshot) + verificação de aderência (Fase 9)
 │   │   └── treino_garmin.py    # envia o plano ao relógio como treino estruturado (Fase 12)
 │   └── analyze/                # plano semanal via Gemini

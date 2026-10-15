@@ -50,10 +50,7 @@ def aplicar_tema(aba: gspread.Worksheet, cor: Cor) -> None:
     r, g, b = cor
     cor_faixa = _rgb((1 - (1 - r) * 0.12, 1 - (1 - g) * 0.12, 1 - (1 - b) * 0.12))
 
-    aba.format("1:1", {
-        "backgroundColor": cor_cabecalho,
-        "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}},
-    })
+    formatar_cabecalho(aba, "1:1", cor)
     aba.freeze(rows=1)
     aba.spreadsheet.batch_update({
         "requests": [{
@@ -70,6 +67,15 @@ def aplicar_tema(aba: gspread.Worksheet, cor: Cor) -> None:
         }]
     })
     aba.update_tab_color(_hex(cor))
+
+
+def formatar_cabecalho(aba: gspread.Worksheet, intervalo: str, cor: Cor) -> None:
+    """Estilo de cabeçalho (fundo na cor da aba, texto branco em negrito) --
+    também usado em coluna nova acrescentada a uma aba que já existia."""
+    aba.format(intervalo, {
+        "backgroundColor": _rgb(cor),
+        "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}},
+    })
 
 
 def adicionar_dropdown(
