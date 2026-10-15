@@ -309,7 +309,9 @@ def resolver_dias_planejados(con: psycopg.Connection, spreadsheet) -> list[tuple
             continue
 
         atividades = con.execute(
-            "SELECT activity_id, tipo_treino, distancia_km, duracao_min, fc_media FROM vw_sessoes WHERE data = %s",
+            # treino de força do mesmo dia não entra na comparação com o plano de corrida
+            "SELECT activity_id, tipo_treino, distancia_km, duracao_min, fc_media FROM vw_sessoes "
+            "WHERE data = %s AND tipo_treino <> 'Força'",
             (data_planejada,),
         ).fetchall()
         resultado = _resolver_dia(

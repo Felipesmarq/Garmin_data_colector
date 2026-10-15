@@ -33,6 +33,7 @@ RETOMADA_ESTAGIOS_SEG = (60, 120, 180, 240, 360, 480, 600)
 # acrescentar caminhadas leves, que não contam como sessão de corrida.
 RETOMADA_SESSOES = 3
 TIPO_CAMINHADA = "Caminhada"
+TIPO_FORCA = "Força"  # vw_sessoes.tipo_treino de treino de força gravado no relógio
 CAMINHADA_MAX_MIN = 45
 # Sessão cumprida = pelo menos 90% do trote prescrito (folga pro erro de
 # detecção corrida/caminhada do Garmin). Só sobe de estágio com
@@ -199,13 +200,16 @@ def estado_retomada(
         durante/depois e na manhã seguinte) -> sobe um;
       - senão -> repete.
     Sem plano anterior lido (`prescrito` None), usa o maior estágio que o
-    trote detectado cumpre. Caminhada (tipo_treino) fica fora da conta de
-    trote: o pouco de "trote" que o Garmin detecta nela não é sessão."""
-    if any(float(s.trote_seg or 0) >= RETOMADA_FIM_TROTE_SEG for s in sessoes):
+    trote detectado cumpre. Caminhada e força (tipo_treino) ficam fora da
+    conta de trote: o pouco de "trote" que o Garmin detecta numa caminhada
+    não é sessão, e treino de força não tem trote nenhum -- mas a dor
+    registrada nelas conta."""
+    corridas = [s for s in sessoes if s.tipo_treino not in (TIPO_CAMINHADA, TIPO_FORCA)]
+    if any(float(s.trote_seg or 0) >= RETOMADA_FIM_TROTE_SEG for s in corridas):
         return None
 
     semana = [s for s in sessoes if s.data >= inicio_semana - timedelta(days=7)]
-    com_trote = [s for s in semana if s.tipo_treino != TIPO_CAMINHADA]
+    com_trote = [s for s in corridas if s.data >= inicio_semana - timedelta(days=7)]
     if prescrito is not None:
         atual = _indice_estagio(prescrito)
     else:

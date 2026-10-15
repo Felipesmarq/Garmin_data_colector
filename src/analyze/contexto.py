@@ -84,7 +84,7 @@ def _dias_pos_corrida(con: psycopg.Connection, dias: list[date]) -> list[date]:
     semana, ou dentro da semana já começada."""
     _, linhas = consultar(
         con,
-        "SELECT DISTINCT data FROM vw_sessoes WHERE tipo_treino <> 'Caminhada' AND data >= %s AND data < %s",
+        "SELECT DISTINCT data FROM vw_sessoes WHERE tipo_treino NOT IN ('Caminhada', 'Força') AND data >= %s AND data < %s",
         (dias[0] - timedelta(days=1), hoje_brt()),
     )
     datas_corrida = {linha[0] for linha in linhas}

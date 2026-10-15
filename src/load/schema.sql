@@ -241,6 +241,9 @@ SELECT
     -- progressão em analyze/retomada.estado_retomada). Sem isso, caminhada
     -- de 40min em FC baixa virava "Longão".
     CASE
+        -- Treino de força gravado no relógio (Fase B, 2026-10): não é corrida
+        -- -- sem isso a duração inteira contava como trote na retomada.
+        WHEN a.tipo = 'strength_training' THEN 'Força'
         WHEN a.efeito_treino_label = 'UNKNOWN' THEN 'Caminhada'
         WHEN s.segundos_correndo / NULLIF(s.segundos_correndo + s.segundos_caminhando, 0) < 0.06
             THEN 'Caminhada'
