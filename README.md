@@ -241,6 +241,18 @@ a 0 em todas. Um sinal de alerta suspende os treinos restantes da semana
 ser preenchido; o plano seguinte recomeça um estágio abaixo. Ver
 [`src/sintomas.py`](src/sintomas.py).
 
+**Força.** Duas vezes por semana, logo depois da corrida, o plano traz uma
+sessão de força (bloco A: panturrilha e tíbia; bloco B: quadril e coxa).
+Os exercícios, séries e repetições vêm do catálogo
+[`src/analyze/forca_catalogo.json`](src/analyze/forca_catalogo.json) e da
+aba "Força", onde o sistema escreve uma linha por exercício e você
+preenche `topo_atingido` (sim/não: chegou ao topo da faixa em todas as
+séries?) e `rir` (repetições que sobravam na última série). Topo atingido
+com RIR 2 ou mais sobe a variação na semana seguinte. A cada 4 semanas, o
+primeiro dia de força começa com o teste de elevação de calcanhar,
+registrado na aba "Teste Calcanhar". A força também vai pro relógio, como
+treino de força.
+
 `planilha_desempenho` sobrescreve as abas "Atividades" (snapshot de
 `vw_sessoes`: pace, velocidade, FC, efeito de treino) e "Resumo Semanal"
 (snapshot de `vw_resumo_semanal`: km, variação %, ACWR) a cada execução —
@@ -376,6 +388,7 @@ enquanto -- não influencia a geração do plano seguinte.
 │       ├── semana.py           # datas da semana (domingo a sábado)
 │       ├── contexto.py         # tudo que o plano precisa, lido do banco e da planilha
 │       ├── retomada.py         # protocolo de Warden (um estágio por semana)
+│       ├── forca.py            # prescrição de força + catálogo forca_catalogo.json
 │       ├── guardrails.py       # ACWR, teto por sessão, dor + conferência do plano em Python
 │       ├── prompt.py           # texto do prompt e da revisão
 │       ├── gemini.py           # chamadas ao Gemini, com modelos de reserva

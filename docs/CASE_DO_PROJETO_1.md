@@ -1030,13 +1030,63 @@ Frequência de polling, prompt, extras — a definir com base no uso real.
 - [ ] Primeiro uso real: aba "Dor" migrada com as colunas novas e um
   domingo com o plano gerado pelas regras novas.
 
+### Fase B — Força na retomada (sugestões do treinador #15, #16, #18, #21-#25, implementada em 2026-10-15)
+**Por quê:** treino de força reduziu lesões esportivas para menos de 1/3 e
+quase cortou pela metade as lesões por sobrecarga, com efeito de dose
+(Lauersen et al., BJSM 2014 e 2018); treino neuromuscular previne canelite
+com alta certeza de evidência (revisão de 2025, Gait & Posture, 12 estudos,
+8.197 participantes); corredores com canelite têm déficit de força no
+sóleo e nos flexores (Mattock et al. 2021). Como tratamento isolado da
+canelite, exercício não superou as comparações (Moen 2012) -- a força entra
+junto com a progressão de corrida, não no lugar dela.
+
+**Requisitos e decisões do usuário:**
+- **Catálogo** (`src/analyze/forca_catalogo.json`, #21): os treinos da fase
+  1 do documento, organizados em cadeias de progressão (ex. elevação de
+  calcanhar bilateral → no degrau → unilateral → unilateral no degrau),
+  cada exercício com séries, faixa de repetições ou segundos, descanso,
+  dicas e o nome correspondente no catálogo de exercícios do Garmin. Sem
+  pliometria nem impacto na retomada (#16); carga e pliometria entram na
+  Fase C.
+- **2 sessões por semana, A e B nas duas** (#15): bloco A (panturrilha e
+  tíbia) + bloco B (quadril e coxa), uns 40 min, **logo depois da corrida**
+  em 2 das sessões de evolução -- os dias leves continuam leves e a
+  panturrilha nunca chega cansada à corrida seguinte (fadiga dos flexores
+  plantares pode reduzir a resistência da tíbia à flexão, Mattock 2024).
+- **Python prescreve, a IA só escolhe os dias** (#22/#24): `forca.prescrever`
+  calcula o exercício de cada cadeia; o LLM marca `forca: true` em 2 dias de
+  corrida; `violacoes_regras` confere o número de dias e que a força só cai
+  em dia de corrida.
+- **Registro por exercício e progressão dupla** (#17/#25): aba "Força", uma
+  linha por exercício prescrito, com `topo_atingido` (sim/não) e `rir` da
+  última série. Topo atingido com RIR >= 2 sobe o nível da cadeia na semana
+  seguinte; dor na tíbia ou alerta na semana anterior seguram a progressão.
+- **Teste de elevação de calcanhar** (#18): a cada 4 semanas, antes da força
+  do primeiro dia (protocolo de Hébert-Losier 2017 / Sleeswijk Visser
+  2025), registrado na aba "Teste Calcanhar". Na retomada é só
+  acompanhamento; os critérios de liberação (#19) são da Fase C.
+- **Relógio:** a força vai como treino de força (`StrengthWorkout`), um
+  grupo de séries por exercício, com o nome do exercício do Garmin e a
+  descrição em português; os exercícios por perna/lado têm as séries
+  dobradas (uma de cada lado). Treino de força gravado no relógio vira
+  `tipo_treino = 'Força'` em `vw_sessoes` e não conta como corrida (antes,
+  a duração inteira contaria como trote e podia até encerrar a retomada).
+
+**Critérios de aceite:**
+- [x] Progressão testada offline: sem histórico começa no nível 1; sobe com
+  topo + RIR 2 ou mais; segura com RIR 1, sem topo ou com dor/alerta;
+  registro posterior ao início da semana é ignorado.
+- [x] Conferência reprova força em 3 dias, em nenhum ou numa caminhada.
+- [x] Treino de força montado pro relógio (séries, repetições/tempo,
+  descanso) e atividade de força no banco fora da conta de trote.
+- [ ] Primeiro uso real: plano de domingo com força, aba "Força" criada e
+  o treino de força aceito pela API do Garmin.
+
 ### Próximas fases (sugestões do treinador, avaliadas em 2026-10-14)
 Ordem combinada com o usuário, depois de uma limpeza/modularização do
 código (feita em 2026-10-14):
 1. **Segurança:** feita -- ver Fase A acima.
-2. **Força na fase de retomada:** catálogo de exercícios, prescrição
-   calculada em Python, validador, coleta de esforço/RIR e teste de
-   elevação de calcanhar; treino de força no relógio.
+2. **Força na fase de retomada:** feita -- ver Fase B acima.
 3. **Regras do pós-retomada:** teto semanal, uma variável de cada vez,
    intensidade só depois de semanas estáveis, semana mais leve a cada 3-4.
 4. **Depois:** cadência só dos trechos de trote (dado ainda não coletado).
