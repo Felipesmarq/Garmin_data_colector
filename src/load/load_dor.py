@@ -17,12 +17,11 @@ semana -- não justifica separar em dois scripts/schedules):
    `activity_id`.
 """
 
-from datetime import date, datetime
-
 import gspread
 import psycopg
 
 from src.db import conectar, sql_upsert
+from src.formato import parse_data
 from src.planilha import adicionar_dropdown, aplicar_tema, formatar_cabecalho, ids_na_coluna, inserir_linhas
 from src.planilha import conectar as conectar_planilha
 from src.sintomas import SINAIS_ALERTA
@@ -123,18 +122,6 @@ def _sim_nao(v) -> bool | None:
     return True if t == SIM else False if t in (NAO, "nao") else None
 
 
-def _data(v) -> date | None:
-    """Data da planilha: ISO (2026-10-20) ou como o Sheets mostra no locale
-    pt-BR (20/10/2026)."""
-    t = _texto(v)
-    for formato in ("%Y-%m-%d", "%d/%m/%Y"):
-        try:
-            return datetime.strptime(t, formato).date()
-        except ValueError:
-            continue
-    return None
-
-
 def importar_preenchidas(con: psycopg.Connection, aba: gspread.Worksheet) -> int:
     """Linhas da planilha com algum sintoma preenchido (dor, manhã seguinte,
     palpação, sinal de alerta ou liberação) -> upsert em stg_dor."""
@@ -156,7 +143,7 @@ def importar_preenchidas(con: psycopg.Connection, aba: gspread.Worksheet) -> int
             _sim_nao(r.get("palpacao_dor")),
             r.get("outra_dor") or None,
             _texto(r.get("sinal_alerta")) or None,
-            _data(r.get("liberado_em")),
+            parse_data(r.get("liberado_em")),
         )
         for r in preenchidas
     ]

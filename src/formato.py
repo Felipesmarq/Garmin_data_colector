@@ -3,6 +3,7 @@ de pace/FC) -- compartilhado entre a planilha, o prompt, o plano e o
 relógio, pra que todos escrevam e leiam do mesmo jeito."""
 
 import re
+from datetime import date, datetime
 
 
 def pace_txt(min_km: float) -> str:
@@ -34,6 +35,18 @@ def numero_br(v, casas: int, remover_zero_a_direita: bool = False) -> str:
     if remover_zero_a_direita:
         texto = texto.rstrip("0").rstrip(".")
     return texto.replace(".", ",")
+
+
+def parse_data(v) -> date | None:
+    """Data lida da planilha: ISO (2026-10-20) ou como o Sheets mostra no
+    locale pt-BR (20/10/2026). None se vazia ou em outro formato."""
+    texto = str(v if v is not None else "").strip()
+    for formato in ("%Y-%m-%d", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(texto, formato).date()
+        except ValueError:
+            continue
+    return None
 
 
 def parse_faixa_pace(texto: str | None) -> tuple[float, float] | None:

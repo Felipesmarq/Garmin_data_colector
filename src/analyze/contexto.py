@@ -20,6 +20,7 @@ from src.analyze.guardrails import (
     instrucao_teto_sessao,
     teto_sessao_km,
 )
+from src.analyze.forca import SESSOES_POR_SEMANA as SESSOES_FORCA, PrescricaoForca, instrucao_forca, prescrever
 from src.analyze.modelos import DIAS_SEMANA_PT, Sessao
 from src.analyze.prompt import JANELA_SEMANAS, construir_prompt, faixas_por_tipo, formatar_tabela
 from src.analyze.retomada import (
@@ -33,7 +34,7 @@ from src.analyze.retomada import (
 from src.analyze.semana import dias_passados, max_corridas
 from src.db import consultar
 from src.planilha import obter_aba
-from src.sintomas import LIMIAR_DOR_TIBIA, alertas_desde
+from src.sintomas import LIMIAR_DOR_TIBIA, alertas_desde, com_dor_tibia
 from src.tempo import hoje_brt
 
 ABA_OBSERVACOES = "Observações"
@@ -107,6 +108,7 @@ class ContextoSemana:
     dias_passados: list[date]  # têm que ser descanso
     dias_pos_corrida: list[date]  # sem corrida (caminhada pode)
     sessoes_evolucao: int  # sessões de evolução da retomada nesta semana
+    forca: PrescricaoForca
     observacoes: str
 
     @property
@@ -120,12 +122,16 @@ class ContextoSemana:
         """Instruções obrigatórias do prompt: o protocolo de retomada (que já
         trata dor e alerta pelo estágio), ou ACWR + teto por sessão + dor
         fora dela."""
+        instr_forca = instrucao_forca(
+            min(SESSOES_FORCA, self.sessoes_evolucao) if self.retomada else None, self.forca.teste_calcanhar
+        )
         if self.retomada:
-            return [instrucao_retomada(self.retomada, self.sessoes_evolucao, DIAS_SEMANA_PT[len(self.dias) - 1])]
+            return [instrucao_retomada(self.retomada, self.sessoes_evolucao, DIAS_SEMANA_PT[len(self.dias) - 1]), instr_forca]
         carga = [
             instrucao_guardrail_acwr(self.acwr),
             instrucao_teto_sessao(self.teto_km, com_aumento=not self.restricao_dor),
             instrucao_guardrail_dor(self.dor_recente, self.houve_alerta),
+            instr_forca,
         ]
         return [i for i in carga if i]
 
@@ -172,6 +178,8 @@ def carregar_contexto(con: psycopg.Connection, spreadsheet: gspread.Spreadsheet,
     livres_evolucao = [d for d in livres if d != dias[-1]]
     dor_recente = dor_mais_recente(sessoes)
     restricao = (dor_recente or 0) >= LIMIAR_DOR_TIBIA or houve_alerta
+    # dor na tíbia na semana anterior ou alerta seguram a progressão da força
+    dor_semana = any(com_dor_tibia(s) for s in sessoes if s.data >= dias[0] - timedelta(days=7))
     linhas_resumo = list(reversed(linhas_resumo_desc))  # ordem cronológica pro prompt
     return ContextoSemana(
         dias=dias,
@@ -188,5 +196,6 @@ def carregar_contexto(con: psycopg.Connection, spreadsheet: gspread.Spreadsheet,
         dias_passados=passados,
         dias_pos_corrida=pos_corrida,
         sessoes_evolucao=min(RETOMADA_SESSOES, max_corridas(livres_evolucao)),
+        forca=prescrever(spreadsheet, dias[0], travar=dor_semana or houve_alerta),
         observacoes=observacoes_recentes(spreadsheet),
     )

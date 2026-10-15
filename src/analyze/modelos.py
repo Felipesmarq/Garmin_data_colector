@@ -31,6 +31,7 @@ class TreinoDia(BaseModel):
     duracao_min: float | None = None
     pace_alvo: str | None = None  # "10:52-12:29 min/km"
     fc_alvo: str | None = None  # "123-133 bpm"
+    forca: bool = False  # sessão de força logo depois da corrida -- conteúdo calculado em Python (analyze/forca.py)
     motivo: str
 
 

@@ -4,6 +4,13 @@ src/load/treino_garmin.py."""
 
 from datetime import date
 
+from src.analyze.forca import (
+    CABECALHO_FORCA,
+    PROTOCOLO_TESTE,
+    PrescricaoForca,
+    obter_aba_forca,
+    obter_aba_teste,
+)
 from src.analyze.modelos import DIAS_SEMANA_PT, PlanoSemanal
 from src.config import EM_CI
 from src.email_util import enviar_email
@@ -93,13 +100,14 @@ def escrever_semana_suspensa(spreadsheet, dias: list[date], motivo: str) -> int:
     return len(dias)
 
 
-def apagar_plano_da_semana(spreadsheet, dias: list[date]) -> tuple[int, int]:
+def apagar_plano_da_semana(spreadsheet, dias: list[date]) -> tuple[int, int, int]:
     """Regeração forçada -- apaga o plano antigo da semana: as linhas da aba
-    "Plano da Semana" e as linhas PLANEJADO de "Atividades". Linhas já
-    resolvidas (REALIZADO_*/NÃO_REALIZADO) e atividades reais não são
-    tocadas: são histórico, não plano. Só deve rodar DEPOIS de o plano novo
-    ser aprovado -- se a geração falhar, o plano atual continua intacto.
-    Devolve (linhas apagadas do plano, linhas PLANEJADO apagadas)."""
+    "Plano da Semana", as linhas PLANEJADO de "Atividades" e as de "Força"
+    ainda não registradas. Linhas já resolvidas (REALIZADO_*/NÃO_REALIZADO),
+    força já registrada e atividades reais não são tocadas: são histórico,
+    não plano. Só deve rodar DEPOIS de o plano novo ser aprovado -- se a
+    geração falhar, o plano atual continua intacto. Devolve (linhas do plano,
+    linhas PLANEJADO, linhas de força) apagadas."""
     datas_semana = {str(d) for d in dias}
 
     aba_plano = obter_aba(spreadsheet, ABA_PLANO, CABECALHO_PLANO, cor=COR_PLANO)
@@ -119,12 +127,23 @@ def apagar_plano_da_semana(spreadsheet, dias: list[date]) -> tuple[int, int]:
         if i > 0 and len(linha) > idx_status and linha[idx_data] in datas_semana and linha[idx_status] == STATUS_PLANEJADO
     ]
 
+    # força ainda não registrada (topo em branco) é plano, não histórico
+    aba_forca = obter_aba_forca(spreadsheet)
+    idx_data_f, idx_topo = CABECALHO_FORCA.index("data"), CABECALHO_FORCA.index("topo_atingido")
+    linhas_forca = [
+        i + 1
+        for i, linha in enumerate(aba_forca.get_all_values())
+        if i > 0 and linha[idx_data_f] in datas_semana and not (len(linha) > idx_topo and linha[idx_topo].strip())
+    ]
+
     # de baixo pra cima, senão o índice das linhas seguintes muda a cada delete
     for r in sorted(linhas_plano, reverse=True):
         aba_plano.delete_rows(r)
     for r in sorted(linhas_ativ, reverse=True):
         aba_ativ.delete_rows(r)
-    return len(linhas_plano), len(linhas_ativ)
+    for r in sorted(linhas_forca, reverse=True):
+        aba_forca.delete_rows(r)
+    return len(linhas_plano), len(linhas_ativ), len(linhas_forca)
 
 
 def escrever_dias_planejados(spreadsheet, plano: PlanoSemanal, dias: list[date], forcar: bool = False) -> int:
@@ -179,10 +198,11 @@ def escrever_dias_planejados(spreadsheet, plano: PlanoSemanal, dias: list[date],
     return len(linhas)
 
 
-def texto_plano(plano: PlanoSemanal, dias: list[date]) -> str:
-    """Plano completo em texto -- dia a dia + estimativas futuras + lógica
-    geral. Compartilhado entre o print do terminal e o corpo do e-mail
-    (enviar_email_resumo), pra não duplicar a formatação em dois lugares."""
+def texto_plano(plano: PlanoSemanal, dias: list[date], forca: PrescricaoForca | None = None) -> str:
+    """Plano completo em texto -- dia a dia + força + estimativas futuras +
+    lógica geral. Compartilhado entre o print do terminal, o corpo do e-mail
+    (enviar_email_resumo) e a revisão de coerência, pra não duplicar a
+    formatação."""
     linhas = []
     for nome_dia, treino, data in zip(DIAS_SEMANA_PT, plano.dias, dias):
         if treino.descanso:
@@ -194,6 +214,15 @@ def texto_plano(plano: PlanoSemanal, dias: list[date]) -> str:
         if treino.fc_alvo:
             partes.append(f"FC {treino.fc_alvo}")
         linhas.append(f"{nome_dia} ({data}): {treino.tipo_treino} -- {', '.join(partes)} -- {treino.motivo}")
+    dias_forca = [nome for nome, treino in zip(DIAS_SEMANA_PT, plano.dias) if treino.forca and not treino.descanso]
+    if forca and dias_forca:
+        linhas.append("")
+        linhas.append(f"Força ({' e '.join(dias_forca)}, logo depois da corrida):")
+        if forca.teste_calcanhar:
+            linhas.append(f"  {PROTOCOLO_TESTE}")
+        linhas.append(forca.texto())
+        if forca.decisoes:
+            linhas.append("  Progressão desta semana: " + "; ".join(forca.decisoes) + ".")
     if plano.estimativas_futuras:
         linhas.append("")
         linhas.append("Estimativas pra tipos ainda não tentados:")
@@ -206,7 +235,7 @@ def texto_plano(plano: PlanoSemanal, dias: list[date]) -> str:
     return "\n".join(linhas)
 
 
-def imprimir_plano(plano: PlanoSemanal, dias: list[date]) -> None:
+def imprimir_plano(plano: PlanoSemanal, dias: list[date], forca: PrescricaoForca | None = None) -> None:
     if EM_CI:
         treinos = sum(1 for d in plano.dias if not d.descanso)
         print(
@@ -214,13 +243,38 @@ def imprimir_plano(plano: PlanoSemanal, dias: list[date]) -> None:
             "-- conteúdo completo no e-mail, na planilha e no relógio]"
         )
         return
-    print(texto_plano(plano, dias))
+    print(texto_plano(plano, dias, forca))
 
 
-def enviar_email_resumo(plano: PlanoSemanal, dias: list[date]) -> None:
+def enviar_email_resumo(plano: PlanoSemanal, dias: list[date], forca: PrescricaoForca | None = None) -> None:
     """Plano completo (dia a dia + estimativas + lógica geral) por e-mail --
     esse conteúdo "não se encaixa" na aba "Plano da Semana" (ver
     _linhas_plano, que só guarda 1 linha por dia como histórico), então vai
     só pro e-mail e pro print do terminal."""
     assunto = f"Plano de treino -- semana de {dias[0].strftime('%d/%m')} a {dias[-1].strftime('%d/%m')}"
-    enviar_email(assunto, texto_plano(plano, dias))
+    enviar_email(assunto, texto_plano(plano, dias, forca))
+
+
+def escrever_forca(spreadsheet, plano: PlanoSemanal, dias: list[date], forca: PrescricaoForca) -> int:
+    """Uma linha por exercício em cada dia de força, na aba "Força", com
+    `topo_atingido`/`rir` em branco pro corredor preencher -- é desse
+    registro que sai a progressão da semana seguinte (forca.prescrever).
+    Semana de teste: uma linha na aba "Teste Calcanhar" no 1º dia de força.
+    Idempotente: dia que já tem linha não ganha outra."""
+    dias_forca = [(nome, data) for nome, treino, data in zip(DIAS_SEMANA_PT, plano.dias, dias) if treino.forca and not treino.descanso]
+    if not dias_forca:
+        return 0
+    aba = obter_aba_forca(spreadsheet)
+    ja_escritas = set(aba.col_values(1)[1:])
+    linhas = [
+        [str(data), nome, e.bloco, e.id, e.nome, e.series, e.faixa_txt(), "", "", ""]
+        for nome, data in dias_forca if str(data) not in ja_escritas
+        for e in forca.exercicios
+    ]
+    inserir_linhas(aba, linhas)
+    if forca.teste_calcanhar:
+        aba_teste = obter_aba_teste(spreadsheet)
+        primeiro = str(dias_forca[0][1])
+        if primeiro not in set(aba_teste.col_values(1)[1:]):
+            inserir_linhas(aba_teste, [[primeiro, "", "", ""]])
+    return len(linhas)

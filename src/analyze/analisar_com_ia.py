@@ -23,12 +23,14 @@ from src.analyze.entrega import (
     apagar_plano_da_semana,
     enviar_email_resumo,
     escrever_dias_planejados,
+    escrever_forca,
     escrever_plano,
     escrever_semana_suspensa,
     imprimir_plano,
     plano_ja_escrito,
     texto_plano,
 )
+from src.analyze.forca import aplicar_forca
 from src.analyze.gemini import gerar_analise, revisar_coerencia
 from src.analyze.guardrails import violacoes_regras
 from src.analyze.modelos import PlanoSemanal, plano_semanal
@@ -84,7 +86,8 @@ def gerar_plano(ctx: ContextoSemana) -> tuple[PlanoSemanal, SessaoRetomada | Non
                      f"[{rotulo} fora das regras de carga:]", problemas)
             continue
         sessao_retomada = aplicar_retomada(candidato, ctx.retomada) if ctx.retomada else None
-        revisao = revisar_coerencia(prompt, texto_plano(candidato, ctx.dias))
+        aplicar_forca(candidato, ctx.forca)
+        revisao = revisar_coerencia(prompt, texto_plano(candidato, ctx.dias, ctx.forca))
         if revisao.coerente:
             if tentativa > 1:
                 print(f"[plano aprovado pela revisão de coerência na {rotulo}]")
@@ -99,13 +102,14 @@ def gerar_plano(ctx: ContextoSemana) -> tuple[PlanoSemanal, SessaoRetomada | Non
 
 def entregar(spreadsheet, plano: PlanoSemanal, ctx: ContextoSemana, sessao_retomada: SessaoRetomada | None, forcar: bool) -> None:
     dias = ctx.dias
-    imprimir_plano(plano, dias)
+    imprimir_plano(plano, dias, ctx.forca)
 
     if forcar:
-        apagadas_plano, apagadas_ativ = apagar_plano_da_semana(spreadsheet, dias)
+        apagadas_plano, apagadas_ativ, apagadas_forca = apagar_plano_da_semana(spreadsheet, dias)
         print(
             f"[plano antigo apagado: {apagadas_plano} linha(s) em '{ABA_PLANO}', "
-            f"{apagadas_ativ} linha(s) {STATUS_PLANEJADO} em '{ABA_ATIVIDADES}']"
+            f"{apagadas_ativ} linha(s) {STATUS_PLANEJADO} em '{ABA_ATIVIDADES}', "
+            f"{apagadas_forca} linha(s) de força não registrada]"
         )
 
     n = escrever_plano(spreadsheet, plano, dias)
@@ -121,14 +125,18 @@ def entregar(spreadsheet, plano: PlanoSemanal, ctx: ContextoSemana, sessao_retom
         print(f"[dias planejados da semana de {dias[0]} já estavam na aba '{ABA_ATIVIDADES}', não duplicados]")
     ordenar_atividades(spreadsheet)
 
-    enviar_email_resumo(plano, dias)
+    n_forca = escrever_forca(spreadsheet, plano, dias, ctx.forca)
+    if n_forca:
+        print(f"[{n_forca} exercício(s) de força escrito(s) na aba de força]")
+
+    enviar_email_resumo(plano, dias, ctx.forca)
     print("[e-mail com o plano da semana enviado]")
 
     # Fase 12 -- só depois do plano aprovado (nunca por candidato) e da
     # entrega central (planilha + e-mail). Best-effort: a integração com o
     # Garmin é mais frágil que o resto, então nada aqui aborta a execução.
     try:
-        enviar_plano_garmin(conectar_garmin(), list(zip(dias, plano.dias)), hoje_brt(), sessao_retomada)
+        enviar_plano_garmin(conectar_garmin(), list(zip(dias, plano.dias)), hoje_brt(), sessao_retomada, ctx.forca)
     except Exception as erro:  # noqa: BLE001 -- best-effort de propósito
         print(f"[Garmin: não foi possível enviar os treinos ao relógio: {type(erro).__name__}: {erro}]")
 

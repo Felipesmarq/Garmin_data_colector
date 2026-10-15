@@ -5,6 +5,7 @@ uma aposta em o modelo perceber o risco sozinho (seção 6.1 do case)."""
 
 from typing import TYPE_CHECKING
 
+from src.analyze.forca import SESSOES_POR_SEMANA as SESSOES_FORCA
 from src.analyze.modelos import DIAS_SEMANA_PT, PlanoSemanal, Sessao, TreinoDia
 from src.analyze.retomada import CAMINHADA_MAX_MIN, RETOMADA_SESSOES
 from src.sintomas import LIMIAR_DOR_TIBIA, dor_tibia
@@ -131,6 +132,12 @@ def violacoes_regras(plano: PlanoSemanal, ctx: "ContextoSemana") -> list[str]:
     for i in corridas:
         if dias[i] in ctx.dias_pos_corrida:
             problemas.append(f"{DIAS_SEMANA_PT[i]} ({dias[i]}): corrida logo depois de um dia de corrida")
+    dias_forca = [i for i, d in enumerate(plano.dias) if d.forca]
+    for i in dias_forca:
+        if i not in corridas:
+            problemas.append(f"{DIAS_SEMANA_PT[i]}: força marcada em dia sem corrida (descanso ou caminhada)")
+    if len(dias_forca) != min(SESSOES_FORCA, len(corridas)):
+        problemas.append(f"força em {len(dias_forca)} dia(s), pedido {min(SESSOES_FORCA, len(corridas))} (depois da corrida)")
     for i in treinos:
         dia = plano.dias[i]
         if eh_caminhada(dia) and dia.duracao_min and dia.duracao_min > CAMINHADA_MAX_MIN:
