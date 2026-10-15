@@ -21,7 +21,11 @@ from datetime import date
 
 from garminconnect import Garmin
 from garminconnect.workout import (
+    ConditionType,
+    ExecutableStep,
     RunningWorkout,
+    StepType,
+    StrengthWorkout,
     TargetType,
     WalkingWorkout,
     WorkoutSegment,
@@ -30,6 +34,8 @@ from garminconnect.workout import (
     create_interval_step,
     create_recovery_step,
     create_repeat_group,
+    create_strength_rest_step,
+    create_strength_set,
     create_warmup_step,
 )
 
@@ -56,6 +62,11 @@ DESAQUECIMENTO_SEG = 5 * 60
 PACE_FALLBACK_MIN_KM = 6.0
 
 _SUFIXO_NOME = re.compile(r" -- (\d{2}/\d{2})$")
+
+# Treino de força (Fase B) vai como um segundo treino no mesmo dia da corrida,
+# com nome próprio -- é pelo nome que se separa um do outro no calendário.
+NOME_FORCA = "Força"
+ESPORTE_FORCA = {"sportTypeId": 5, "sportTypeKey": "strength_training", "displayOrder": 5}
 
 
 def _usa_alvo_fc(tipo: str | None) -> bool:
@@ -191,20 +202,82 @@ def construir_treino(dia, data: date, retomada=None) -> RunningWorkout | Walking
     return _treino(dia, data, passos, _duracao_estimada_seg(dia, extra))
 
 
-def _achar_workout_agendado(api: Garmin, data: date) -> dict | None:
+def _achar_workout_agendado(api: Garmin, data: date, forca: bool = False) -> dict | None:
     """Item do calendário de um treino NOSSO já agendado nessa data (tem
     `id` do agendamento e `workoutId` do treino), ou None. "Nosso" = nome no
     formato `<tipo> -- dd/mm` com o dd/mm da própria data: acha o treino da
     data mesmo se o tipo mudou entre execuções (plano regerado), sem
-    depender do nome exato, e ignora treinos manuais do usuário."""
+    depender do nome exato, e ignora treinos manuais do usuário. `forca`
+    escolhe entre o treino de força ("Força -- dd/mm") e o de corrida/
+    caminhada do dia."""
     calendario = api.get_scheduled_workouts(data.year, data.month)
     for item in calendario.get("calendarItems", []):
         if item.get("itemType") != "workout" or item.get("date") != data.isoformat():
             continue
-        casou = _SUFIXO_NOME.search(item.get("title") or "")
-        if casou and casou.group(1) == data.strftime("%d/%m"):
+        titulo = item.get("title") or ""
+        casou = _SUFIXO_NOME.search(titulo)
+        if casou and casou.group(1) == data.strftime("%d/%m") and titulo.startswith(f"{NOME_FORCA} --") == forca:
             return item
     return None
+
+
+def _passo_forca(exercicio, ordem: int) -> ExecutableStep:
+    """Um exercício de força: por repetições (topo da faixa -- o corredor
+    para com RIR 2) ou por tempo (isometria, equilíbrio, prancha)."""
+    categoria, nome = exercicio.garmin
+    if exercicio.unidade == "reps":
+        condicao = {"conditionTypeId": ConditionType.REPS, "conditionTypeKey": "reps", "displayOrder": 10, "displayable": True}
+    else:
+        condicao = {"conditionTypeId": ConditionType.TIME, "conditionTypeKey": "time", "displayOrder": 2, "displayable": True}
+    return ExecutableStep(
+        stepOrder=ordem,
+        stepType={"stepTypeId": StepType.INTERVAL, "stepTypeKey": "interval", "displayOrder": 3},
+        endCondition=condicao,
+        endConditionValue=float(exercicio.faixa[1]),
+        targetType={"workoutTargetTypeId": TargetType.NO_TARGET, "workoutTargetTypeKey": "no.target", "displayOrder": 1},
+        category=categoria,
+        exerciseName=nome,
+        description=f"{exercicio.nome} -- {exercicio.faixa_txt()}",
+    )
+
+
+def construir_treino_forca(data: date, prescricao) -> StrengthWorkout:
+    """Sessão de força do dia (blocos A e B), cada exercício como grupo de
+    séries (exercício + descanso). `prescricao` é uma
+    analyze.forca.PrescricaoForca (duck typing). Exercício por perna/lado:
+    as séries dobram (uma de cada lado)."""
+    passos, ordem = [], 1
+    for exercicio in prescricao.exercicios:
+        series = exercicio.series * (2 if exercicio.por_lado else 1)
+        if exercicio.unidade == "reps":
+            categoria, nome = exercicio.garmin
+            grupo = create_strength_set(categoria, ordem, series, exercicio.faixa[1], exercicio.descanso_seg, exercise_name=nome)
+            grupo.workoutSteps[0].description = f"{exercicio.nome} -- {exercicio.faixa_txt()}"
+        else:
+            grupo = create_repeat_group(
+                series, [_passo_forca(exercicio, ordem + 1), create_strength_rest_step(exercicio.descanso_seg, ordem + 2)], ordem
+            )
+        passos.append(grupo)
+        ordem += 3
+    nomes = "; ".join(f"{e.nome} {e.faixa_txt()}" for e in prescricao.exercicios)
+    return StrengthWorkout(
+        workoutName=_nome_treino(NOME_FORCA, data),
+        description=f"Logo depois da corrida. Pare com 2 repetições sobrando (RIR 2). {nomes}"[:1000],
+        estimatedDurationInSecs=40 * 60,
+        workoutSegments=[WorkoutSegment(segmentOrder=1, sportType=ESPORTE_FORCA, workoutSteps=passos)],
+    )
+
+
+def enviar_treino_forca(api: Garmin, data: date, prescricao) -> str:
+    """Cria (ou atualiza) e agenda o treino de força do dia."""
+    treino = construir_treino_forca(data, prescricao)
+    existente = _achar_workout_agendado(api, data, forca=True)
+    if existente:
+        api.update_workout(existente["workoutId"], treino.to_dict())
+        return "atualizado"
+    criado = api.upload_strength_workout(treino)
+    api.schedule_workout(criado["workoutId"], data.isoformat())
+    return "criado"
 
 
 def enviar_treino(api: Garmin, dia, data: date, retomada=None) -> str | None:
@@ -242,20 +315,26 @@ def _remover(api: Garmin, item: dict) -> None:
 
 
 def remover_treino(api: Garmin, data: date) -> bool:
-    """Tira do calendário (e da biblioteca) o treino nosso agendado na data,
-    se houver -- usado quando um sinal de alerta suspende o plano."""
-    existente = _achar_workout_agendado(api, data)
-    if existente:
-        _remover(api, existente)
-    return existente is not None
+    """Tira do calendário (e da biblioteca) os treinos nossos agendados na
+    data (corrida/caminhada e força), se houver -- usado quando um sinal de
+    alerta suspende o plano."""
+    removeu = False
+    for forca in (False, True):
+        existente = _achar_workout_agendado(api, data, forca=forca)
+        if existente:
+            _remover(api, existente)
+            removeu = True
+    return removeu
 
 
-def enviar_plano(api: Garmin, dias_do_plano: list[tuple[date, object]], hoje: date, retomada=None) -> None:
+def enviar_plano(api: Garmin, dias_do_plano: list[tuple[date, object]], hoje: date, retomada=None, forca=None) -> None:
     """Best-effort: uma falha num dia é registrada e o resto segue; nada é
     levantado pra fora. Só envia datas de hoje em diante -- agendar treino no
     passado não faz sentido (relógio nunca vai executá-lo). Com `retomada`,
     toda sessão de evolução da semana vai com a estrutura de caminhada +
-    trote dela; caminhada extra vai como treino de caminhada."""
+    trote dela; caminhada extra vai como treino de caminhada. Com `forca`
+    (analyze.forca.PrescricaoForca), os dias marcados ganham também o
+    treino de força."""
     for data, dia in dias_do_plano:
         if data < hoje:
             continue
@@ -268,3 +347,14 @@ def enviar_plano(api: Garmin, dias_do_plano: list[tuple[date, object]], hoje: da
             print(f"[Garmin: treino de {data} {resultado} ({dia.tipo_treino or 'Descanso'})]")
         elif not dia.descanso:
             print(f"[Garmin: treino de {data} ({dia.tipo_treino}) sem distância nem duração, não enviado]")
+        if forca is None:
+            continue
+        try:
+            if dia.forca and not dia.descanso:
+                print(f"[Garmin: força de {data} {enviar_treino_forca(api, data, forca)}]")
+            elif existente := _achar_workout_agendado(api, data, forca=True):
+                # plano regerado tirou a força do dia
+                _remover(api, existente)
+                print(f"[Garmin: força de {data} removida]")
+        except Exception as erro:  # noqa: BLE001 -- best-effort de propósito
+            print(f"[Garmin: falha na força de {data}: {type(erro).__name__}: {erro}]")
